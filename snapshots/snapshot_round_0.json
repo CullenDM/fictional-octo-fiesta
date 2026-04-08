@@ -4,9 +4,9 @@
       {
         "Hypothesis": {
           "meta": {
-            "id": "15ef75f6-e595-4631-8e84-f59823e3e661",
-            "created_at": "2026-04-08T00:08:22.915126964+00:00",
-            "last_updated": "2026-04-08T00:08:22.915296894+00:00",
+            "id": "4f5b12cd-d103-4d59-982b-9dd787b6d629",
+            "created_at": "2026-04-08T05:40:30.020546600+00:00",
+            "last_updated": "2026-04-08T05:40:30.020638526+00:00",
             "round_id": 0,
             "belief_score": 0.0,
             "source_entropy": 1.0,
@@ -24,9 +24,9 @@
       {
         "Hypothesis": {
           "meta": {
-            "id": "e0b9e4ee-2368-4aba-9c48-eb1e009859ca",
-            "created_at": "2026-04-08T00:08:22.915233590+00:00",
-            "last_updated": "2026-04-08T00:08:22.915298311+00:00",
+            "id": "58c1636d-3f3c-45af-94de-e0a0c67ec6ca",
+            "created_at": "2026-04-08T05:40:30.020613659+00:00",
+            "last_updated": "2026-04-08T05:40:30.020639176+00:00",
             "round_id": 0,
             "belief_score": 0.0,
             "source_entropy": 1.0,
@@ -44,9 +44,9 @@
       {
         "Source": {
           "meta": {
-            "id": "022b692f-d097-4bbf-b5a1-4fe169b8714a",
-            "created_at": "2026-04-08T00:08:22.915655596+00:00",
-            "last_updated": "2026-04-08T00:08:22.915655596+00:00",
+            "id": "21d8a85a-aec6-43a6-a372-cfde515ee663",
+            "created_at": "2026-04-08T05:40:30.020862222+00:00",
+            "last_updated": "2026-04-08T05:40:30.020862222+00:00",
             "round_id": 0,
             "belief_score": 0.5,
             "source_entropy": 0.5,
@@ -61,25 +61,25 @@
       {
         "Evidence": {
           "meta": {
-            "id": "dfdd5027-4bb4-4adf-8927-1c596848183e",
-            "created_at": "2026-04-08T00:08:22.915659089+00:00",
-            "last_updated": "2026-04-08T00:08:22.915659089+00:00",
+            "id": "53fcd906-94f9-40d3-a20d-dd6b3a897069",
+            "created_at": "2026-04-08T05:40:30.020863785+00:00",
+            "last_updated": "2026-04-08T05:40:30.020863785+00:00",
             "round_id": 0,
             "belief_score": 0.95,
             "source_entropy": 0.050000012,
             "is_stale": false
           },
           "snippet": "assert sum(1,2)==3 PASSED",
-          "source_id": "022b692f-d097-4bbf-b5a1-4fe169b8714a",
+          "source_id": "21d8a85a-aec6-43a6-a372-cfde515ee663",
           "quality": "TestVerified"
         }
       },
       {
         "Claim": {
           "meta": {
-            "id": "c73178fd-9fd4-4a2a-9395-0509ff9dd226",
-            "created_at": "2026-04-08T00:08:22.915664470+00:00",
-            "last_updated": "2026-04-08T00:08:22.915675924+00:00",
+            "id": "6db587ec-2772-414d-9a56-c630e133e29d",
+            "created_at": "2026-04-08T05:40:30.020866031+00:00",
+            "last_updated": "2026-04-08T05:40:30.020868563+00:00",
             "round_id": 0,
             "belief_score": 0.95,
             "source_entropy": 0.050000012,
