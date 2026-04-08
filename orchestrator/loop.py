@@ -19,14 +19,64 @@ from typing import Any
 
 import yaml
 
-# Rust harness (via PyO3)
-import great_sage_harness as harness
-
 from .ollama_client import OllamaClient, OllamaConfig
 from . import brain
 from .tool_executor import execute_tool
 
 logger = logging.getLogger("great_sage")
+
+
+async def _run_skeptic_phase(
+    state: Any,
+    ollama: OllamaClient,
+    model_cfg: dict[str, Any],
+    save_snapshot: bool = True,
+) -> int:
+    """
+    Run a full deterministic Phase-6 skeptic pass:
+    - optional snapshot,
+    - role swap worker -> skeptic,
+    - evaluate all Supported claims,
+    - apply results through harness,
+    - caller is responsible for subsequent role swap if needed.
+    Returns tokens consumed by skeptic model calls.
+    """
+    if save_snapshot:
+        state.save_snapshot()
+
+    await ollama.unload_model(
+        model_cfg.get(
+            "worker",
+            "hf.co/TeichAI/Qwen3-4B-Thinking-2507-Claude-4.5-Opus-High-Reasoning-Distill-GGUF:Q3_K_S",
+        )
+    )
+    await ollama.load_model(model_cfg.get("skeptic", "nemotron-mini:4b"))
+
+    supported_claims = json.loads(state.get_supported_claims_json())
+    skeptic_decisions = []
+    tokens_used = 0
+    for claim in supported_claims:
+        evidence_text = "\n".join(
+            f"- {e.get('snippet', '')}" for e in claim.get("evidence", [])
+        ) or "(none)"
+        skeptic_eval = await brain.skeptic_evaluate(
+            ollama,
+            claim_text=claim.get("claim_text", ""),
+            evidence_snippets=evidence_text,
+            hypothesis_text="",
+        )
+        tokens_used += skeptic_eval.get("tokens", 0)
+        skeptic_decisions.append(
+            {
+                "claim_id": claim.get("claim_id"),
+                "result": skeptic_eval.get("result", "Inconclusive"),
+                "confidence": float(skeptic_eval.get("confidence", 0.5)),
+                "critique": skeptic_eval.get("critique", ""),
+            }
+        )
+
+    state.run_phase_skeptic(json.dumps(skeptic_decisions))
+    return tokens_used
 
 
 def load_config(config_path: str = "config.yaml") -> dict[str, Any]:
@@ -93,7 +143,15 @@ async def run_great_sage(
     threshold_cfg = config.get("thresholds", {})
     snapshot_dir = config.get("snapshot", {}).get("path", "./snapshots/")
 
-    # --- Initialize Harness ---
+    # --- Initialize Harness (lazy import so CLI --help works without extension installed) ---
+    try:
+        import great_sage_harness as harness
+    except ModuleNotFoundError as e:
+        return {
+            "error": "great_sage_harness module is not installed/importable. Build/install the PyO3 extension first.",
+            "details": str(e),
+        }
+
     state = harness.HarnessState(
         snapshot_dir=snapshot_dir,
         config_dict=threshold_cfg,

@@ -528,13 +528,29 @@ impl HarnessState {
         .unwrap())
     }
 
-    /// Phase 6: Skeptic STUB — auto-promote Supported → Verified
-    fn run_phase_skeptic_stub(&self) -> PyResult<()> {
+    /// Phase 6: apply Skeptic outcomes (Stage 2 path).
+    /// decisions_json: [{"claim_id","result","confidence","critique"}]
+    fn run_phase_skeptic(&self, decisions_json: &str) -> PyResult<String> {
+        let decisions: Vec<phases::SkepticDecision> = serde_json::from_str(decisions_json)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON: {}", e)))?;
+
         let mut g = self.graph.write().map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Lock poisoned: {}", e))
         })?;
-        phases::phase_skeptic_stub(&mut g, &self.config);
-        Ok(())
+
+        let (promoted, disputed) = phases::phase_skeptic_apply(&mut g, &self.config, &decisions);
+        let round_id = g.current_round;
+
+        self.audit.log(
+            &audit::AuditEntry::new(round_id, 6, "skeptic_applied")
+                .with_detail(&format!("promoted={}, disputed={}", promoted, disputed)),
+        );
+
+        Ok(serde_json::json!({
+            "promoted": promoted,
+            "disputed": disputed
+        })
+        .to_string())
     }
 
     /// Phase 6: apply Skeptic outcomes (Stage 2 path).
@@ -598,13 +614,62 @@ impl HarnessState {
         Ok(decision.to_string())
     }
 
-    /// Phase 8: Reframe STUB — mark stalled as Refuted
-    fn run_phase_reframe_stub(&self) -> PyResult<()> {
+    /// Phase 8: deterministic reframe seed preparation.
+    /// Prunes stalled branches and returns the reframe seed JSON.
+    fn run_phase_reframe_prepare(&self) -> PyResult<String> {
         let mut g = self.graph.write().map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Lock poisoned: {}", e))
         })?;
-        phases::phase_reframe_stub(&mut g);
-        Ok(())
+        let seed = phases::phase_reframe_prepare(&mut g);
+        serde_json::to_string(&seed)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Serialize: {}", e)))
+    }
+
+    /// Phase 8: insert Worker-proposed reframe hypotheses deterministically.
+    /// proposals_json: [{"text","priority","test_id"}]
+    fn run_phase_reframe_insert(&self, proposals_json: &str) -> PyResult<String> {
+        let proposals: Vec<phases::ReframeHypothesisProposal> = serde_json::from_str(proposals_json)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON: {}", e)))?;
+
+        let mut g = self.graph.write().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Lock poisoned: {}", e))
+        })?;
+        let result = phases::phase_reframe_insert(&mut g, &proposals);
+        serde_json::to_string(&result)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Serialize: {}", e)))
+    }
+
+    /// Phase 10 deterministic final-verify mutation application.
+    /// decision_json fields:
+    /// {candidate_id,result,confidence,contested_claim_ids,critique,delta}
+    fn run_phase_final_verify_apply(&self, decision_json: &str) -> PyResult<String> {
+        let decision: phases::FinalVerifyDecision = serde_json::from_str(decision_json)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON: {}", e)))?;
+
+        let mut g = self.graph.write().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Lock poisoned: {}", e))
+        })?;
+        let round_id = g.current_round;
+
+        match phases::phase_final_verify_apply(&mut g, &decision) {
+            Ok(result) => {
+                self.audit.log(
+                    &audit::AuditEntry::new(round_id, 10, "final_verify_applied")
+                        .with_detail(&format!("candidate_id={}, outcome={}", decision.candidate_id, result.outcome)),
+                );
+                serde_json::to_string(&result)
+                    .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Serialize: {}", e)))
+            }
+            Err(e) => {
+                self.audit.log_rejection(round_id, 10, "V-10-FINAL", &e);
+                Ok(serde_json::json!({
+                    "outcome": "rejected",
+                    "error": e,
+                    "contradiction_id": null
+                })
+                .to_string())
+            }
+        }
     }
 
     /// Phase 9: Bank — score candidates, return ranked list
@@ -614,15 +679,27 @@ impl HarnessState {
         })?;
 
         let scored = phases::phase_bank(&mut g);
+        let round_id = g.current_round;
 
         let result: Vec<serde_json::Value> = scored
             .iter()
-            .map(|(id, s_a, cs)| {
-                serde_json::json!({
+            .filter_map(|(id, s_a, cs)| {
+                let Some(NodeKind::CandidateAnswer(c)) = g.get_node(id) else {
+                    return None;
+                };
+                let validation = validator::validate_candidate_for_banking(&c.content);
+                if !validation.passed {
+                    for v in validation.violations {
+                        self.audit.log_rejection(round_id, 9, &v.check_id, &v.message);
+                    }
+                    return None;
+                }
+
+                Some(serde_json::json!({
                     "id": id,
                     "s_a": s_a,
                     "contradiction_score": cs
-                })
+                }))
             })
             .collect();
 

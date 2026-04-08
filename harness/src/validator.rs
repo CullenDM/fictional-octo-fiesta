@@ -353,26 +353,52 @@ fn check_v10_schema_completeness(delta: &Value, violations: &mut Vec<Violation>)
 
 /// V-11: CodeRun Patch Validity — CandidateAnswerNode.content must parse
 /// as valid unified diff before banking.
-/// Note: for Stage 1, we do a basic heuristic check.  A content string that
-/// contains standard unified diff markers (---/+++ or diff --git) is valid.
-/// Plain answer text (non-code tasks) always passes.
 fn check_v11_patch_validity(content: &str, violations: &mut Vec<Violation>) {
-    // If it looks like it's trying to be a diff, validate the format
-    let has_diff_markers = content.contains("---") && content.contains("+++");
-    let has_git_diff = content.starts_with("diff --git");
-
-    // Only validate if it appears to be a diff
-    if has_diff_markers || has_git_diff {
-        // Basic validation: must have at least one hunk header
-        let has_hunk = content.contains("@@");
-        if !has_hunk {
-            violations.push(Violation {
-                check_id: "V-11".to_string(),
-                message: "Content appears to be a diff but has no hunk headers (@@)".to_string(),
-                offending_data: Some(content.chars().take(200).collect()),
-            });
-        }
+    // For code tasks, candidate content is required to be a unified diff.
+    if !is_valid_unified_diff(content) {
+        violations.push(Violation {
+            check_id: "V-11".to_string(),
+            message: "CandidateAnswer content is not a valid unified diff".to_string(),
+            offending_data: Some(content.chars().take(200).collect()),
+        });
     }
+}
+
+fn is_valid_unified_diff(content: &str) -> bool {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() {
+        return false;
+    }
+
+    let mut saw_file_header = false;
+    let mut saw_hunk = false;
+    let mut i = 0usize;
+
+    while i < lines.len() {
+        let line = lines[i];
+
+        if line.starts_with("diff --git ") {
+            i += 1;
+            continue;
+        }
+
+        if line.starts_with("--- ") {
+            if i + 1 >= lines.len() || !lines[i + 1].starts_with("+++ ") {
+                return false;
+            }
+            saw_file_header = true;
+            i += 2;
+            continue;
+        }
+
+        if line.starts_with("@@") {
+            saw_hunk = true;
+        }
+
+        i += 1;
+    }
+
+    saw_file_header && saw_hunk
 }
 
 // ---------------------------------------------------------------------------
@@ -548,5 +574,25 @@ mod tests {
 
         let result = validate_support_mass(1.0);
         assert!(result.passed);
+    }
+
+    #[test]
+    fn test_v11_patch_validity_rejects_non_diff() {
+        let result = validate_candidate_for_banking("Here is my prose answer.");
+        assert!(!result.passed);
+        assert!(result.violations.iter().any(|v| v.check_id == "V-11"));
+    }
+
+    #[test]
+    fn test_v11_patch_validity_accepts_unified_diff() {
+        let diff = r#"diff --git a/src/app.py b/src/app.py
+--- a/src/app.py
++++ b/src/app.py
+@@ -1,2 +1,2 @@
+-print("old")
++print("new")
+"#;
+        let result = validate_candidate_for_banking(diff);
+        assert!(result.passed, "Violations: {:?}", result.violations);
     }
 }

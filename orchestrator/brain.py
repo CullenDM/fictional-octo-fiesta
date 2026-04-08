@@ -220,7 +220,7 @@ async def compress(
 
 
 # ---------------------------------------------------------------------------
-# Phase 6: Skeptic (Stage 1 = stub, Stage 2 = real)
+# Phase 6: Skeptic
 # ---------------------------------------------------------------------------
 
 async def skeptic_evaluate(
@@ -232,7 +232,6 @@ async def skeptic_evaluate(
 ) -> dict[str, Any]:
     """
     Phase 6: Adversarial evaluation of a claim.
-    Stage 1 stub: always returns Pass with confidence 0.1
     """
     if use_stub:
         return {
@@ -404,7 +403,7 @@ async def synthesize(
 
 
 # ---------------------------------------------------------------------------
-# Phase 10: Final Verify (stub)
+# Phase 10: Final Verify
 # ---------------------------------------------------------------------------
 
 async def final_verify(
@@ -417,7 +416,6 @@ async def final_verify(
 ) -> dict[str, Any]:
     """
     Phase 10: Final adversarial verification.
-    Stage 1 stub: always passes.
     """
     if use_stub:
         return {
@@ -446,3 +444,44 @@ async def final_verify(
         "contested_claims": parsed.get("contested_claims", []),
         "tokens": result.get("tokens", 0),
     }
+
+
+async def reframe(
+    client: OllamaClient,
+    task_prompt: str,
+    refuted_hypotheses: list[str],
+    stalled_hypotheses: list[str],
+    seed_summary_json: str,
+) -> dict[str, Any]:
+    """
+    Phase 8 Worker call: generate structurally distinct hypotheses from reframe seed.
+    """
+    prompt = prompts.render_reframe_prompt(
+        task_prompt=task_prompt,
+        refuted_hypotheses=json.dumps(refuted_hypotheses, indent=2),
+        stalled_hypotheses=json.dumps(stalled_hypotheses, indent=2),
+        graph_summary=seed_summary_json,
+    )
+    result = await client.generate_json(
+        prompt=prompt,
+        role="worker",
+        system_prompt="You are GREAT SAGE's reframing strategist.",
+        temperature=0.4,
+    )
+    parsed = result.get("parsed", {})
+    hypotheses = []
+    for h in parsed.get("hypotheses", []):
+        if not isinstance(h, dict):
+            continue
+        text = str(h.get("text", "")).strip()
+        if not text:
+            continue
+        hypotheses.append(
+            {
+                "text": text,
+                "priority": float(h.get("priority", 0.6)),
+                "test_id": h.get("test_id"),
+            }
+        )
+
+    return {"hypotheses": hypotheses, "tokens": result.get("tokens", 0)}
