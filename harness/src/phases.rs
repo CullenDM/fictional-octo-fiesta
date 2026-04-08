@@ -175,6 +175,44 @@ pub fn phase_audit(graph: &mut SageGraph) -> AuditSummary {
         summary.stale_count += 1;
     }
 
+    // Inference chain validation: DerivedFrom(C1 → C2) where C1 is Unverified
+    // means C2's derivation is unsupported — mark C2 Disputed.
+    let claim_ids_for_inference: Vec<String> =
+        graph.claims().iter().map(|c| c.meta.id.clone()).collect();
+
+    for c1_id in &claim_ids_for_inference {
+        let is_unverified = match graph.get_node(c1_id) {
+            Some(NodeKind::Claim(c)) => c.status == ClaimStatus::Unverified,
+            _ => false,
+        };
+        if !is_unverified {
+            continue;
+        }
+        // Collect DerivedFrom targets (collect IDs first to release the borrow)
+        let derived_targets: Vec<String> = graph
+            .outgoing_neighbors(c1_id)
+            .into_iter()
+            .filter_map(|(node, edge)| {
+                if edge == EdgeKind::DerivedFrom {
+                    Some(node.id().to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for c2_id in derived_targets {
+            if let Some(NodeKind::Claim(c2)) = graph.get_node_mut(&c2_id) {
+                if c2.status != ClaimStatus::Disputed {
+                    c2.status = ClaimStatus::Disputed;
+                    c2.meta.belief_score = 0.0;
+                    c2.meta.touch();
+                    summary.disputed_count += 1;
+                }
+            }
+        }
+    }
+
     summary.contradiction_count = summary.disputed_count;
     summary
 }
