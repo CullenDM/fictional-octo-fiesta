@@ -175,6 +175,44 @@ pub fn phase_audit(graph: &mut SageGraph) -> AuditSummary {
         summary.stale_count += 1;
     }
 
+    // Inference chain validation: DerivedFrom(C1 → C2) where C1 is Unverified
+    // means C2's derivation is unsupported — mark C2 Disputed.
+    let claim_ids_for_inference: Vec<String> =
+        graph.claims().iter().map(|c| c.meta.id.clone()).collect();
+
+    for c1_id in &claim_ids_for_inference {
+        let is_unverified = match graph.get_node(c1_id) {
+            Some(NodeKind::Claim(c)) => c.status == ClaimStatus::Unverified,
+            _ => false,
+        };
+        if !is_unverified {
+            continue;
+        }
+        // Collect DerivedFrom targets (collect IDs first to release the borrow)
+        let derived_targets: Vec<String> = graph
+            .outgoing_neighbors(c1_id)
+            .into_iter()
+            .filter_map(|(node, edge)| {
+                if edge == EdgeKind::DerivedFrom {
+                    Some(node.id().to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for c2_id in derived_targets {
+            if let Some(NodeKind::Claim(c2)) = graph.get_node_mut(&c2_id) {
+                if c2.status != ClaimStatus::Disputed {
+                    c2.status = ClaimStatus::Disputed;
+                    c2.meta.belief_score = 0.0;
+                    c2.meta.touch();
+                    summary.disputed_count += 1;
+                }
+            }
+        }
+    }
+
     summary.contradiction_count = summary.disputed_count;
     summary
 }
@@ -205,6 +243,69 @@ pub struct AuditSummary {
     pub contradiction_count: u32,
     pub stale_count: u32,
     pub disputed_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkepticDecision {
+    pub claim_id: String,
+    pub result: String,
+    pub confidence: f32,
+    pub critique: Option<String>,
+}
+
+/// Phase 6: apply Skeptic outcomes to Supported claims.
+/// confidence is interpreted as p_fail per spec.
+pub fn phase_skeptic_apply(
+    graph: &mut SageGraph,
+    config: &PhaseConfig,
+    decisions: &[SkepticDecision],
+) -> (u32, u32) {
+    let mut promoted = 0u32;
+    let mut disputed = 0u32;
+
+    for d in decisions {
+        let skeptic_result = match d.result.as_str() {
+            "Pass" => scorer::SkepticResult::Pass,
+            "Fail" => scorer::SkepticResult::Fail,
+            _ => scorer::SkepticResult::Inconclusive,
+        };
+
+        if let Some(NodeKind::Claim(claim)) = graph.get_node(&d.claim_id) {
+            if claim.status != ClaimStatus::Supported {
+                continue;
+            }
+        } else {
+            continue;
+        }
+
+        let can_promote = scorer::can_promote(
+            &d.claim_id,
+            skeptic_result,
+            graph,
+            config.diversity_min,
+            config.support_mass_min,
+        );
+
+        if can_promote {
+            if let Some(NodeKind::Claim(c)) = graph.get_node_mut(&d.claim_id) {
+                c.status = ClaimStatus::Verified;
+                let skeptic_confidence_correct = (1.0 - d.confidence).clamp(0.0, 1.0);
+                c.meta.belief_score =
+                    scorer::bayesian_update(c.meta.belief_score, skeptic_confidence_correct);
+                c.meta.source_entropy = 1.0 - c.meta.belief_score;
+                c.meta.touch();
+                promoted += 1;
+            }
+        } else if let Some(NodeKind::Claim(c)) = graph.get_node_mut(&d.claim_id) {
+            c.status = ClaimStatus::Disputed;
+            c.meta.belief_score = 0.0;
+            c.meta.source_entropy = 1.0;
+            c.meta.touch();
+            disputed += 1;
+        }
+    }
+
+    (promoted, disputed)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

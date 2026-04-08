@@ -228,10 +228,19 @@ async def skeptic_evaluate(
     claim_text: str,
     evidence_snippets: str,
     hypothesis_text: str,
+    use_stub: bool = False,
 ) -> dict[str, Any]:
     """
     Phase 6: Adversarial evaluation of a claim.
     """
+    if use_stub:
+        return {
+            "result": "Pass",
+            "confidence": 0.1,
+            "critique": "Stage 1 stub — Skeptic auto-pass",
+            "tokens": 0,
+        }
+
     prompt = prompts.render_skeptic_prompt(
         claim_text, evidence_snippets, hypothesis_text
     )
@@ -254,6 +263,146 @@ async def skeptic_evaluate(
 
 
 # ---------------------------------------------------------------------------
+# Phase 8: Reframe — generate new hypotheses from stalled/refuted state
+# ---------------------------------------------------------------------------
+
+async def reframe(
+    client: OllamaClient,
+    task_prompt: str,
+    refuted_texts: list[str],
+    stalled_texts: list[str],
+    graph_summary: str,
+) -> dict[str, Any]:
+    """
+    Phase 8: Generate replacement hypotheses after stall/refutation.
+    Returns {"hypotheses": [{text, priority}], "tokens": N}.
+    """
+    refuted_str = "\n".join(f"- {t}" for t in refuted_texts) or "(none)"
+    stalled_str = "\n".join(f"- {t}" for t in stalled_texts) or "(none)"
+
+    prompt = prompts.render_reframe_prompt(
+        task_prompt, refuted_str, stalled_str, graph_summary
+    )
+
+    result = await client.generate_json(
+        prompt=prompt,
+        role="worker",
+        system_prompt="You are GREAT SAGE's research strategy reframing engine.",
+        temperature=0.4,
+    )
+
+    parsed = result.get("parsed", {})
+    hypotheses = [
+        {
+            "text": str(h["text"]),
+            "priority": float(h.get("priority", 0.5)),
+        }
+        for h in parsed.get("hypotheses", [])
+        if isinstance(h, dict) and "text" in h
+    ]
+
+    logger.info(f"Reframe: {len(hypotheses)} new hypotheses, {result.get('tokens', 0)} tokens")
+    return {"hypotheses": hypotheses, "tokens": result.get("tokens", 0)}
+
+
+# ---------------------------------------------------------------------------
+# Phase 10 exhaustion: Reformulate or conclude impossibility
+# ---------------------------------------------------------------------------
+
+async def reformulate(
+    client: OllamaClient,
+    task_prompt: str,
+    verified_claims_json: str,
+    critique_history: list[str],
+    language: str = "python",
+    test_code: str = "",
+) -> dict[str, Any]:
+    """
+    Phase 10 exhaustion path: given all verified facts and every failure
+    critique, decide whether to try a different implementation or declare
+    the task cannot be completed.
+
+    Returns {
+        "decision": "retry" | "cannot_conclude",
+        "implementation": str,   # non-empty iff decision=="retry"
+        "filename": str,
+        "reason": str,
+        "known_facts": list[str],  # non-empty iff decision=="cannot_conclude"
+        "tokens": int,
+    }
+    """
+    prompt = prompts.render_reformulate_prompt(
+        task_prompt, verified_claims_json, critique_history, language, test_code
+    )
+
+    result = await client.generate_json(
+        prompt=prompt,
+        role="worker",
+        system_prompt=(
+            "You are GREAT SAGE's reformulation engine. "
+            "Output only valid JSON with exactly the keys specified."
+        ),
+        temperature=0.3,
+    )
+
+    parsed = result.get("parsed", {})
+    decision = str(parsed.get("decision", "cannot_conclude"))
+    if decision not in ("retry", "cannot_conclude"):
+        decision = "cannot_conclude"
+
+    logger.info(f"Reformulate: decision={decision}, {result.get('tokens', 0)} tokens")
+    return {
+        "decision": decision,
+        "implementation": str(parsed.get("implementation", "")),
+        "filename": str(parsed.get("filename", "solution.py")),
+        "reason": str(parsed.get("reason", "")),
+        "known_facts": list(parsed.get("known_facts", [])),
+        "tokens": result.get("tokens", 0),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Pre-Phase 9: Synthesize implementation from Verified claims
+# ---------------------------------------------------------------------------
+
+async def synthesize(
+    client: OllamaClient,
+    task_prompt: str,
+    verified_claims_json: str,
+    language: str = "python",
+    test_code: str = "",
+) -> dict[str, Any]:
+    """
+    Pre-Phase 9: Given Verified claims, generate a concrete implementation.
+    Returns {"implementation": "code string", "filename": "path", "tokens": N}.
+    """
+    prompt = prompts.render_synthesize_prompt(
+        task_prompt, verified_claims_json, language, test_code
+    )
+
+    result = await client.generate_json(
+        prompt=prompt,
+        role="worker",
+        system_prompt=(
+            "You are GREAT SAGE's code synthesis engine. "
+            "Output only valid JSON with 'implementation' and 'filename' keys."
+        ),
+        temperature=0.2,
+    )
+
+    parsed = result.get("parsed", {})
+    impl = str(parsed.get("implementation", ""))
+    filename = str(parsed.get("filename", "solution.py"))
+
+    logger.info(f"Synthesize: {len(impl)} chars → {filename}, {result.get('tokens', 0)} tokens")
+    return {
+        "implementation": impl,
+        "filename": filename,
+        "tokens": result.get("tokens", 0),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Phase 10: Final Verify
 # ---------------------------------------------------------------------------
 
@@ -263,10 +412,19 @@ async def final_verify(
     supporting_claims: str,
     test_output: str,
     task_prompt: str,
+    use_stub: bool = False,
 ) -> dict[str, Any]:
     """
     Phase 10: Final adversarial verification.
     """
+    if use_stub:
+        return {
+            "result": "Pass",
+            "confidence": 1.0,
+            "critique": "",
+            "tokens": 0,
+        }
+
     prompt = prompts.render_final_verify_prompt(
         candidate_content, supporting_claims, test_output, task_prompt
     )

@@ -230,6 +230,99 @@ Rules:
 
 
 # ---------------------------------------------------------------------------
+# §8.4.5 Synthesize (pre-Phase 9) — generate implementation from Verified claims
+# ---------------------------------------------------------------------------
+
+def render_synthesize_prompt(
+    task_prompt: str,
+    verified_claims_json: str,
+    language: str = "python",
+    test_code: str = "",
+) -> str:
+    test_section = f"\nTESTS TO PASS:\n```{language}\n{test_code}\n```" if test_code else ""
+    return f"""You are a code synthesis engine.  Given verified factual claims about what
+an implementation must do, write the implementation that satisfies all claims.
+
+TASK:
+{task_prompt}
+
+VERIFIED CLAIMS (all must hold in your implementation):
+{verified_claims_json}
+{test_section}
+
+Respond in JSON:
+{{
+  "implementation": "complete file content as a string",
+  "filename": "relative path to write (e.g. solution.py)"
+}}
+
+Rules:
+- Write a complete, runnable file — not pseudocode, not snippets
+- Every Verified claim must be satisfied by the implementation
+- If tests are provided, the implementation must pass all of them
+- Output ONLY the JSON object — no markdown fences, no explanation outside the JSON
+- Do NOT include id, created_at, belief_score, or any harness fields
+"""
+
+
+# ---------------------------------------------------------------------------
+# §8.4.6 Reformulate (Phase 10 exhaustion path)
+# ---------------------------------------------------------------------------
+
+def render_reformulate_prompt(
+    task_prompt: str,
+    verified_claims_json: str,
+    critique_history: list[str],
+    language: str = "python",
+    test_code: str = "",
+) -> str:
+    critique_section = "\n".join(
+        f"  Attempt {i + 1}: {c}" for i, c in enumerate(critique_history)
+    ) or "  (none recorded)"
+    test_section = f"\nTESTS TO PASS:\n```{language}\n{test_code}\n```" if test_code else ""
+    return f"""You are GREAT SAGE's reformulation engine.  All previous implementation
+attempts have failed final verification.  Decide whether to try a genuinely
+different approach or to conclude that the task cannot be completed.
+
+ORIGINAL TASK:
+{task_prompt}
+
+VERIFIED FACTS GATHERED:
+{verified_claims_json}
+
+PREVIOUS FAILURE CRITIQUES:
+{critique_section}
+{test_section}
+
+Respond in JSON — choose EXACTLY ONE decision:
+
+Option A — retry with a different approach:
+{{
+  "decision": "retry",
+  "implementation": "complete file content as a string",
+  "filename": "relative path (e.g. solution.py)",
+  "reason": "what specifically is different about this attempt vs. previous ones"
+}}
+
+Option B — cannot conclude:
+{{
+  "decision": "cannot_conclude",
+  "reason": "specific explanation: what is impossible, contradictory, or underspecified",
+  "known_facts": ["fact 1", "fact 2"]
+}}
+
+Rules:
+- Choose "retry" ONLY if you have a genuinely different implementation strategy
+  that directly addresses the critique(s) above
+- Choose "cannot_conclude" if: task is ambiguous, contradictory, requires
+  impossible capabilities, or the evidence shows it cannot be done
+- For retry: the implementation must be a complete runnable file
+- For cannot_conclude: known_facts must cite verified claims, not speculation
+- Do NOT include harness fields (id, created_at, belief_score, etc.)
+"""
+
+
+# ---------------------------------------------------------------------------
 # §8.5 Reframe (Phase 8) — Stage 2 only
 # ---------------------------------------------------------------------------
 

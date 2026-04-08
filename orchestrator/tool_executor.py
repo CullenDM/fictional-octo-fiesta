@@ -184,6 +184,44 @@ def _is_private_or_loopback_host(host: str) -> bool:
         return normalized.endswith(".local")
 
 
+def parse_pytest_output(output: str) -> tuple[list[str], list[str]]:
+    """
+    Parse pytest output to extract passed/failed test names.
+    Handles standard pytest verbose output format.
+
+def _safe_working_dir(working_dir: str) -> Path | None:
+    resolved = (REPO_ROOT / working_dir).resolve()
+    try:
+        resolved.relative_to(REPO_ROOT)
+        return resolved
+    except ValueError:
+        return None
+
+
+def _validate_command(command: str) -> tuple[bool, str]:
+    if not command.strip():
+        return False, "empty command"
+    if len(command) > 500:
+        return False, "command too long"
+    if "\n" in command or "\r" in command:
+        return False, "multiline command not allowed"
+    for pat in DISALLOWED_COMMAND_PATTERNS:
+        if re.search(pat, command, re.IGNORECASE):
+            return False, f"disallowed pattern matched: {pat}"
+    return True, ""
+
+
+def _is_private_or_loopback_host(host: str) -> bool:
+    normalized = host.strip().lower()
+    if normalized in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    try:
+        ip = ipaddress.ip_address(normalized)
+        return ip.is_private or ip.is_loopback or ip.is_link_local
+    except ValueError:
+        return normalized.endswith(".local")
+
+
 def parse_test_output(output: str) -> tuple[list[str], list[str]]:
     """
     Parse test output to extract passed/failed test names.
@@ -403,9 +441,6 @@ async def execute_visit(url: str, timeout: float = 15.0) -> dict[str, Any]:
     Returns both human-readable content and machine-parseable tree.
     """
     try:
-        from bs4 import BeautifulSoup
-        import html2text
-
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"}:
             raise ValueError("Only http/https URLs are allowed")

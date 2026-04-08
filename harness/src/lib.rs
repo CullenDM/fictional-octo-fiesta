@@ -553,6 +553,31 @@ impl HarnessState {
         .to_string())
     }
 
+    /// Phase 6: apply Skeptic outcomes (Stage 2 path).
+    /// decisions_json: [{"claim_id","result","confidence","critique"}]
+    fn run_phase_skeptic(&self, decisions_json: &str) -> PyResult<String> {
+        let decisions: Vec<phases::SkepticDecision> = serde_json::from_str(decisions_json)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON: {}", e)))?;
+
+        let mut g = self.graph.write().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Lock poisoned: {}", e))
+        })?;
+
+        let (promoted, disputed) = phases::phase_skeptic_apply(&mut g, &self.config, &decisions);
+        let round_id = g.current_round;
+
+        self.audit.log(
+            &audit::AuditEntry::new(round_id, 6, "skeptic_applied")
+                .with_detail(&format!("promoted={}, disputed={}", promoted, disputed)),
+        );
+
+        Ok(serde_json::json!({
+            "promoted": promoted,
+            "disputed": disputed
+        })
+        .to_string())
+    }
+
     /// Phase 7: Monitor — evaluate routing decision
     /// Returns "continue", "stall", or "converge"
     fn run_phase_monitor(
@@ -680,6 +705,93 @@ impl HarnessState {
 
         serde_json::to_string(&result)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Serialize: {}", e)))
+    }
+
+    /// Create a ContradictionNode recording a Final Verify failure.
+    /// Adds an Invalidates edge: ContradictionNode → CandidateAnswerNode.
+    /// Returns the new ContradictionNode UUID.
+    fn add_contradiction(
+        &self,
+        candidate_id: String,
+        critique: String,
+        source_str: String,
+        contested_claims: Vec<String>,
+        skeptic_p_fail: f32,
+    ) -> PyResult<String> {
+        let mut g = self.graph.write().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Lock poisoned: {}", e))
+        })?;
+
+        let round_id = g.current_round;
+        let source = if source_str == "FinalVerifySkeptic" {
+            ContradictionSource::FinalVerifySkeptic
+        } else {
+            ContradictionSource::AuditRefutes
+        };
+
+        let node = NodeKind::Contradiction(ContradictionNode {
+            meta: NodeMeta::new(round_id, 0.0),
+            critique,
+            source,
+            contested_claims,
+            skeptic_p_fail: skeptic_p_fail.clamp(0.0, 1.0),
+        });
+
+        let id = node.id().to_string();
+        g.add_node(node);
+
+        // Non-fatal: candidate may not be in graph yet if synthesis produced nothing
+        let _ = g.add_edge(&id, &candidate_id, EdgeKind::Invalidates);
+
+        self.audit.log_mutation(round_id, 10, vec![id.clone()]);
+        Ok(id)
+    }
+
+    /// Reopen a stalled/refuted HypothesisNode for a micro-round.
+    /// Resets status to Open and clears stall_count.
+    /// Returns true if the hypothesis was found and updated.
+    fn reopen_hypothesis(&self, hypothesis_id: String) -> PyResult<bool> {
+        let mut g = self.graph.write().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Lock poisoned: {}", e))
+        })?;
+
+        match g.get_node_mut(&hypothesis_id) {
+            Some(NodeKind::Hypothesis(h)) => {
+                h.status = HypothesisStatus::Open;
+                h.stall_count = 0;
+                h.meta.touch();
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Register a CandidateAnswerNode in the graph from a synthesized implementation.
+    /// Returns the new node's UUID.
+    fn add_candidate(
+        &self,
+        content: String,
+        supporting_claim_ids: Vec<String>,
+    ) -> PyResult<String> {
+        let mut g = self.graph.write().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Lock poisoned: {}", e))
+        })?;
+
+        let round_id = g.current_round;
+        let node = NodeKind::CandidateAnswer(CandidateAnswerNode {
+            meta: NodeMeta::new(round_id, 0.0),
+            content,
+            supporting_claims: supporting_claim_ids,
+            contradiction_score: 0.0,
+            max_reopen_count: 2,
+            reopen_count: 0,
+        });
+
+        let id = node.id().to_string();
+        g.add_node(node);
+
+        self.audit.log_mutation(round_id, 9, vec![id.clone()]);
+        Ok(id)
     }
 
     /// Increment the round counter
