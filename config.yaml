@@ -1,0 +1,29 @@
+# GREAT SAGE Configuration (§9.2)
+# Models are agnostic — set to whatever fits your system's RAM.
+
+model:
+  worker: "qwen2.5:1.5b"        # Worker model tag (any Ollama model)
+  skeptic: "qwen2.5:1.5b"       # Skeptic model tag (Stage 2)
+  worker_ctx: 8192               # Context window for Worker
+  skeptic_ctx: 4096              # Context window for Skeptic
+
+budget:
+  total_tokens: 200000           # Max tokens per run
+  round_tokens: 25000            # Budget per round
+  max_rounds: 12                 # Max search rounds
+  tool_steps: 5                  # Max tool calls per branch per round
+  tool_timeout: 30               # Seconds per tool call
+
+thresholds:
+  eig_min: 0.05                  # Minimum EIG to warrant investigation
+  eig_delta_stall: 0.01          # EIG change below this = stalling
+  stall_count: 2                 # Rounds of stalling before Reframe
+  convergence_sa: 0.85           # S_A threshold for "good enough"
+  diversity_min: 0.50            # Min diversity index for promotion
+  support_mass_min: 1.00         # Min support mass for promotion
+  reopen_max: 2                  # Max times a candidate can reopen
+  redundancy_pct: 0.60           # Redundancy threshold for context pruning
+
+snapshot:
+  format: jsonl
+  path: ./snapshots/

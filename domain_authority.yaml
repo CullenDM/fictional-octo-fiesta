@@ -1,0 +1,39 @@
+# Domain Authority Configuration (§2.5.1)
+# Static lookup — NEVER model-generated (enforced by V-04).
+# Values: [0.0, 1.0] where 1.0 = absolute authority.
+
+default: 0.50
+
+overrides:
+  # Language standard libraries & official docs
+  stdlib_docs: 0.99
+  official_sdk: 0.95
+  docs.python.org: 0.98
+  docs.rust-lang.org: 0.98
+  developer.mozilla.org: 0.95
+  nodejs.org: 0.95
+
+  # Major code hosting
+  github.com: 0.75
+  gitlab.com: 0.70
+
+  # Community Q&A
+  stackoverflow.com: 0.65
+  reddit.com: 0.45
+
+  # Package registries
+  pypi.org: 0.80
+  crates.io: 0.80
+  npmjs.com: 0.75
+
+  # Local files (highest authority)
+  local_file: 1.00
+
+  # Wikis
+  en.wikipedia.org: 0.60
+  wiki: 0.50
+
+  # Blogs and tutorials
+  medium.com: 0.40
+  dev.to: 0.45
+  blog: 0.40

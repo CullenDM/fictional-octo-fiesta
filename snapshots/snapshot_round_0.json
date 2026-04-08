@@ -1,0 +1,115 @@
+{
+  "graph": {
+    "nodes": [
+      {
+        "Hypothesis": {
+          "meta": {
+            "id": "15ef75f6-e595-4631-8e84-f59823e3e661",
+            "created_at": "2026-04-08T00:08:22.915126964+00:00",
+            "last_updated": "2026-04-08T00:08:22.915296894+00:00",
+            "round_id": 0,
+            "belief_score": 0.0,
+            "source_entropy": 1.0,
+            "is_stale": false
+          },
+          "text": "The function should return the sum of two numbers",
+          "status": "Active",
+          "priority": 0.9,
+          "stall_count": 0,
+          "max_reopen": 2,
+          "reopen_count": 0,
+          "test_id": "test_add"
+        }
+      },
+      {
+        "Hypothesis": {
+          "meta": {
+            "id": "e0b9e4ee-2368-4aba-9c48-eb1e009859ca",
+            "created_at": "2026-04-08T00:08:22.915233590+00:00",
+            "last_updated": "2026-04-08T00:08:22.915298311+00:00",
+            "round_id": 0,
+            "belief_score": 0.0,
+            "source_entropy": 1.0,
+            "is_stale": false
+          },
+          "text": "Edge cases should handle negative numbers",
+          "status": "Active",
+          "priority": 0.5,
+          "stall_count": 0,
+          "max_reopen": 2,
+          "reopen_count": 0,
+          "test_id": null
+        }
+      },
+      {
+        "Source": {
+          "meta": {
+            "id": "022b692f-d097-4bbf-b5a1-4fe169b8714a",
+            "created_at": "2026-04-08T00:08:22.915655596+00:00",
+            "last_updated": "2026-04-08T00:08:22.915655596+00:00",
+            "round_id": 0,
+            "belief_score": 0.5,
+            "source_entropy": 0.5,
+            "is_stale": false
+          },
+          "url": "file://test.py",
+          "status": "Unvisited",
+          "domain_auth": 1.0,
+          "reliability": 1.0
+        }
+      },
+      {
+        "Evidence": {
+          "meta": {
+            "id": "dfdd5027-4bb4-4adf-8927-1c596848183e",
+            "created_at": "2026-04-08T00:08:22.915659089+00:00",
+            "last_updated": "2026-04-08T00:08:22.915659089+00:00",
+            "round_id": 0,
+            "belief_score": 0.95,
+            "source_entropy": 0.050000012,
+            "is_stale": false
+          },
+          "snippet": "assert sum(1,2)==3 PASSED",
+          "source_id": "022b692f-d097-4bbf-b5a1-4fe169b8714a",
+          "quality": "TestVerified"
+        }
+      },
+      {
+        "Claim": {
+          "meta": {
+            "id": "c73178fd-9fd4-4a2a-9395-0509ff9dd226",
+            "created_at": "2026-04-08T00:08:22.915664470+00:00",
+            "last_updated": "2026-04-08T00:08:22.915675924+00:00",
+            "round_id": 0,
+            "belief_score": 0.95,
+            "source_entropy": 0.050000012,
+            "is_stale": false
+          },
+          "text": "sum(1,2) returns 3",
+          "evidence_ids": [],
+          "status": "Supported"
+        }
+      }
+    ],
+    "node_holes": [],
+    "edge_property": "directed",
+    "edges": [
+      [
+        3,
+        2,
+        "Cites"
+      ],
+      [
+        3,
+        4,
+        "Supports"
+      ],
+      [
+        4,
+        0,
+        "Supports"
+      ]
+    ]
+  },
+  "current_round": 0
+}

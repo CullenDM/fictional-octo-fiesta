@@ -1,0 +1,18 @@
+[package]
+name = "great_sage_harness"
+version = "0.1.0"
+edition = "2021"
+description = "Deterministic harness for GREAT SAGE: graph, validators, scorers, phase state machine"
+
+[lib]
+name = "great_sage_harness"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module"] }
+petgraph = { version = "0.7", features = ["serde-1"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"

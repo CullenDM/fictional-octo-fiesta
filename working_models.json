@@ -1,0 +1,17 @@
+[
+  "hf.co/LuminLabs/Lumin-Haiku-4-Instruct:Q4_K_M",
+  "hf.co/TeichAI/Qwen3-4B-Thinking-2507-Claude-4.5-Opus-High-Reasoning-Distill-GGUF:Q3_K_S",
+  "hf.co/LiquidAI/LFM2.5-1.2B-JP-GGUF:Q4_K_M",
+  "hf.co/LiquidAI/LFM2.5-350M-GGUF:Q4_K_M",
+  "hf.co/Mungert/rwkv7-2.9B-world-GGUF:IQ4_XS",
+  "hf.co/lmstudio-community/gemma-3-270m-it-GGUF:Q4_K_M",
+  "hf.co/lilyanatia/Bonsai-1.7B-requantized:TQ1_0",
+  "hf.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF:Q4_K_M",
+  "qwen2.5:1.5b",
+  "functiongemma:270m-it-fp16",
+  "functiongemma:latest",
+  "hf.co/unsloth/Qwen3-0.6B-GGUF:Q4_K_XL",
+  "hf.co/ruv/ruvltra-claude-code:Q4_K_M",
+  "llama3.2:1b",
+  "deepseek-r1:1.5b"
+]
