@@ -1,12 +1,11 @@
 """
 GREAT SAGE Main Orchestrator Loop
 
-The 10-phase loop with Stage 1 stubs.
-Routing: 1 → 2 → 3 → 4 → 5 → [stub 6] → 7 → route
-From 7: Continue → 2, Stall → 8 (stub), Converge → 9 → [stub 10] → emit
+Routing: 1 → 2 → 3 → 4 → 5 → 6 → 7 → route
+From 7: Continue → 2, Stall → 8 (stub), Converge → 9 → 10.
 
-Python owns the LLM call sites.
-Rust harness owns everything deterministic.
+Python owns model call sites and role swaps.
+Rust harness owns deterministic graph logic, scoring, and validation.
 """
 
 import asyncio
@@ -39,8 +38,8 @@ def load_config(config_path: str = "config.yaml") -> dict[str, Any]:
         # Defaults from §9.2
         return {
             "model": {
-                "worker": "qwen2.5:1.5b",
-                "skeptic": "qwen2.5:1.5b",
+                "worker": "hf.co/TeichAI/Qwen3-4B-Thinking-2507-Claude-4.5-Opus-High-Reasoning-Distill-GGUF:Q3_K_S",
+                "skeptic": "nemotron-mini:4b",
                 "worker_ctx": 8192,
                 "skeptic_ctx": 4096,
             },
@@ -108,8 +107,8 @@ async def run_great_sage(
 
     # --- Initialize Ollama Client ---
     ollama = OllamaClient(OllamaConfig(
-        worker_model=model_cfg.get("worker", "qwen2.5:1.5b"),
-        skeptic_model=model_cfg.get("skeptic", "qwen2.5:1.5b"),
+        worker_model=model_cfg.get("worker", "hf.co/TeichAI/Qwen3-4B-Thinking-2507-Claude-4.5-Opus-High-Reasoning-Distill-GGUF:Q3_K_S"),
+        skeptic_model=model_cfg.get("skeptic", "nemotron-mini:4b"),
         worker_ctx=model_cfg.get("worker_ctx", 8192),
         skeptic_ctx=model_cfg.get("skeptic_ctx", 4096),
     ))
@@ -288,10 +287,46 @@ async def run_great_sage(
             )
 
             # ---------------------------------------------------------------
-            # Phase 6: Skeptic STUB
+            # Phase 6: Skeptic
             # ---------------------------------------------------------------
-            logger.info("── Phase 6: Skeptic (STUB — auto-promote) ──")
-            state.run_phase_skeptic_stub()
+            logger.info("── Phase 6: Skeptic ──")
+
+            # Snapshot before role swap (§1.3 / §4.6)
+            state.save_snapshot()
+            await ollama.unload_model(model_cfg.get("worker", "hf.co/TeichAI/Qwen3-4B-Thinking-2507-Claude-4.5-Opus-High-Reasoning-Distill-GGUF:Q3_K_S"))
+            await ollama.load_model(model_cfg.get("skeptic", "nemotron-mini:4b"))
+
+            supported_claims = json.loads(state.get_supported_claims_json())
+            skeptic_decisions = []
+            for claim in supported_claims:
+                evidence_text = "\n".join(
+                    f"- {e.get('snippet', '')}" for e in claim.get("evidence", [])
+                ) or "(none)"
+                skeptic_eval = await brain.skeptic_evaluate(
+                    ollama,
+                    claim_text=claim.get("claim_text", ""),
+                    evidence_snippets=evidence_text,
+                    hypothesis_text="",
+                    use_stub=False,
+                )
+                total_tokens += skeptic_eval.get("tokens", 0)
+                skeptic_decisions.append(
+                    {
+                        "claim_id": claim.get("claim_id"),
+                        "result": skeptic_eval.get("result", "Inconclusive"),
+                        "confidence": float(skeptic_eval.get("confidence", 0.5)),
+                        "critique": skeptic_eval.get("critique", ""),
+                    }
+                )
+
+            skeptic_summary = json.loads(state.run_phase_skeptic(json.dumps(skeptic_decisions)))
+            logger.info(
+                "  Skeptic outcomes: promoted=%s disputed=%s",
+                skeptic_summary.get("promoted", 0),
+                skeptic_summary.get("disputed", 0),
+            )
+            await ollama.unload_model(model_cfg.get("skeptic", "nemotron-mini:4b"))
+            await ollama.load_model(model_cfg.get("worker", "hf.co/TeichAI/Qwen3-4B-Thinking-2507-Claude-4.5-Opus-High-Reasoning-Distill-GGUF:Q3_K_S"))
 
             # ---------------------------------------------------------------
             # Phase 7: Monitor
@@ -342,9 +377,54 @@ async def run_great_sage(
             logger.info("  No candidates banked")
 
         # ===================================================================
-        # Phase 10: Final Verify STUB
+        # Phase 10: Final Verify
         # ===================================================================
-        logger.info("── Phase 10: Final Verify (STUB — auto-pass) ──")
+        logger.info("── Phase 10: Final Verify ──")
+
+        final_verify = {"result": "Pass", "confidence": 0.0, "critique": ""}
+        if candidates:
+            # Snapshot before role swap (§1.3 / §4.10)
+            state.save_snapshot()
+            await ollama.unload_model(model_cfg.get("worker", "hf.co/TeichAI/Qwen3-4B-Thinking-2507-Claude-4.5-Opus-High-Reasoning-Distill-GGUF:Q3_K_S"))
+            await ollama.load_model(model_cfg.get("skeptic", "nemotron-mini:4b"))
+
+            test_output = ""
+            if is_code_task and test_code:
+                run_result = await execute_tool(
+                    {
+                        "type": "CodeRun",
+                        "command": "pytest -q test_sage_spec.py",
+                        "working_dir": working_dir,
+                        "timeout_secs": tool_timeout,
+                    }
+                )
+                test_output = json.dumps(run_result, indent=2)
+                if run_result.get("tests_failed") or run_result.get("exit_code", 0) != 0:
+                    final_verify = {
+                        "result": "Fail",
+                        "confidence": 1.0,
+                        "critique": "Automatic fail: full test suite did not pass in Final Verify",
+                    }
+
+            if final_verify["result"] != "Fail":
+                final_verify = await brain.final_verify(
+                    client=ollama,
+                    candidate_content=json.dumps(candidates[0], indent=2),
+                    supporting_claims=state.get_verified_claims_json(),
+                    test_output=test_output,
+                    task_prompt=task_prompt,
+                    use_stub=False,
+                )
+                total_tokens += final_verify.get("tokens", 0)
+
+            logger.info(
+                "  Final Verify result=%s p_fail=%.3f critique=%s",
+                final_verify.get("result", "Fail"),
+                float(final_verify.get("confidence", 1.0)),
+                final_verify.get("critique", "")[:120],
+            )
+            await ollama.unload_model(model_cfg.get("skeptic", "nemotron-mini:4b"))
+            await ollama.load_model(model_cfg.get("worker", "hf.co/TeichAI/Qwen3-4B-Thinking-2507-Claude-4.5-Opus-High-Reasoning-Distill-GGUF:Q3_K_S"))
 
         # Final snapshot
         final_snapshot = state.save_snapshot()
@@ -357,6 +437,7 @@ async def run_great_sage(
             "total_tokens": total_tokens,
             "rounds_completed": round_id + 1 if 'round_id' in dir() else 0,
             "all_tests_pass": all_tests_pass,
+            "final_verify": final_verify,
             "snapshot_path": final_snapshot,
         }
 

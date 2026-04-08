@@ -2,8 +2,8 @@
 # Models are agnostic — set to whatever fits your system's RAM.
 
 model:
-  worker: "qwen2.5:1.5b"        # Worker model tag (any Ollama model)
-  skeptic: "qwen2.5:1.5b"       # Skeptic model tag (Stage 2)
+  worker: "hf.co/TeichAI/Qwen3-4B-Thinking-2507-Claude-4.5-Opus-High-Reasoning-Distill-GGUF:Q3_K_S"  # Worker model tag (requested)
+  skeptic: "nemotron-mini:4b"   # Skeptic model tag (Stage 2, testing target)
   worker_ctx: 8192               # Context window for Worker
   skeptic_ctx: 4096              # Context window for Skeptic
 

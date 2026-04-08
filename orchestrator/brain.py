@@ -228,7 +228,7 @@ async def skeptic_evaluate(
     claim_text: str,
     evidence_snippets: str,
     hypothesis_text: str,
-    use_stub: bool = True,
+    use_stub: bool = False,
 ) -> dict[str, Any]:
     """
     Phase 6: Adversarial evaluation of a claim.
@@ -236,10 +236,9 @@ async def skeptic_evaluate(
     """
     if use_stub:
         return {
-            "verdict": "Pass",
+            "result": "Pass",
             "confidence": 0.1,
             "critique": "Stage 1 stub — Skeptic auto-pass",
-            "p_fail": 0.0,
             "tokens": 0,
         }
 
@@ -257,10 +256,9 @@ async def skeptic_evaluate(
     parsed = result.get("parsed", {})
 
     return {
-        "verdict": parsed.get("verdict", "Inconclusive"),
-        "confidence": float(parsed.get("confidence", 0.5)),
+        "result": parsed.get("result", parsed.get("verdict", "Inconclusive")),
+        "confidence": float(parsed.get("confidence", parsed.get("p_fail", 0.5))),
         "critique": str(parsed.get("critique", ""))[:300],
-        "p_fail": float(parsed.get("p_fail", 0.5)),
         "tokens": result.get("tokens", 0),
     }
 
@@ -275,7 +273,7 @@ async def final_verify(
     supporting_claims: str,
     test_output: str,
     task_prompt: str,
-    use_stub: bool = True,
+    use_stub: bool = False,
 ) -> dict[str, Any]:
     """
     Phase 10: Final adversarial verification.
@@ -283,10 +281,9 @@ async def final_verify(
     """
     if use_stub:
         return {
-            "verdict": "Pass",
+            "result": "Pass",
             "confidence": 1.0,
             "critique": "",
-            "p_fail": 0.0,
             "tokens": 0,
         }
 
@@ -303,10 +300,9 @@ async def final_verify(
 
     parsed = result.get("parsed", {})
     return {
-        "verdict": parsed.get("verdict", "Fail"),
-        "confidence": float(parsed.get("confidence", 0.5)),
+        "result": parsed.get("result", parsed.get("verdict", "Fail")),
+        "confidence": float(parsed.get("confidence", parsed.get("p_fail", 0.5))),
         "critique": str(parsed.get("critique", ""))[:300],
-        "p_fail": float(parsed.get("p_fail", 0.5)),
         "contested_claims": parsed.get("contested_claims", []),
         "tokens": result.get("tokens", 0),
     }

@@ -10,9 +10,13 @@ Handles:
 import asyncio
 import json
 import logging
+import os
+from pathlib import Path
 import re
 import subprocess
 import time
+from urllib.parse import urlparse
+import ipaddress
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,6 +25,18 @@ import html2text
 import httpx
 
 logger = logging.getLogger("great_sage.tools")
+REPO_ROOT = Path(".").resolve()
+DISALLOWED_COMMAND_PATTERNS = [
+    r"\brm\s+-rf\b",
+    r"\bsudo\b",
+    r"\bchmod\s+777\b",
+    r"\bchown\b",
+    r"\bmkfs\b",
+    r"\bdd\s+if=",
+    r"\bcurl\b.*\|\s*(bash|sh)",
+    r"\bwget\b.*\|\s*(bash|sh)",
+    r":\(\)\s*\{",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -66,15 +82,30 @@ def execute_code_run(
     Parses pytest output for test pass/fail counts.
     """
     start = time.monotonic()
+    safe, reason = _validate_command(command)
+    if not safe:
+        return CodeRunResult("", f"Blocked unsafe command: {reason}", -3, [], [], 0)
+
+    safe_working_dir = _safe_working_dir(working_dir)
+    if safe_working_dir is None:
+        return CodeRunResult(
+            "",
+            f"Blocked working directory outside repository: {working_dir}",
+            -4,
+            [],
+            [],
+            0,
+        )
 
     try:
         proc = subprocess.run(
-            command,
-            shell=True,
+            ["bash", "-lc", command],
+            shell=False,
             capture_output=True,
             text=True,
             timeout=timeout_secs,
-            cwd=working_dir,
+            cwd=str(safe_working_dir),
+            env=_safe_env(),
         )
         duration_ms = int((time.monotonic() - start) * 1000)
 
@@ -113,6 +144,46 @@ def execute_code_run(
             tests_failed=[],
             duration_ms=duration_ms,
         )
+
+
+def _safe_env() -> dict[str, str]:
+    keep_keys = {"PATH", "HOME", "LANG", "LC_ALL", "PYTHONPATH"}
+    env = {k: v for k, v in os.environ.items() if k in keep_keys}
+    env["PYTHONUNBUFFERED"] = "1"
+    return env
+
+
+def _safe_working_dir(working_dir: str) -> Path | None:
+    resolved = (REPO_ROOT / working_dir).resolve()
+    try:
+        resolved.relative_to(REPO_ROOT)
+        return resolved
+    except ValueError:
+        return None
+
+
+def _validate_command(command: str) -> tuple[bool, str]:
+    if not command.strip():
+        return False, "empty command"
+    if len(command) > 500:
+        return False, "command too long"
+    if "\n" in command or "\r" in command:
+        return False, "multiline command not allowed"
+    for pat in DISALLOWED_COMMAND_PATTERNS:
+        if re.search(pat, command, re.IGNORECASE):
+            return False, f"disallowed pattern matched: {pat}"
+    return True, ""
+
+
+def _is_private_or_loopback_host(host: str) -> bool:
+    normalized = host.strip().lower()
+    if normalized in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    try:
+        ip = ipaddress.ip_address(normalized)
+        return ip.is_private or ip.is_loopback or ip.is_link_local
+    except ValueError:
+        return normalized.endswith(".local")
 
 
 def parse_pytest_output(output: str) -> tuple[list[str], list[str]]:
@@ -279,6 +350,14 @@ async def execute_visit(url: str, timeout: float = 15.0) -> dict[str, Any]:
     Returns both human-readable content and machine-parseable tree.
     """
     try:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("Only http/https URLs are allowed")
+        if not parsed.hostname:
+            raise ValueError("Missing hostname")
+        if _is_private_or_loopback_host(parsed.hostname):
+            raise ValueError("Private and loopback hosts are blocked")
+
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(timeout),
             follow_redirects=True,

@@ -22,8 +22,8 @@ logger = logging.getLogger("great_sage.ollama")
 @dataclass
 class OllamaConfig:
     base_url: str = "http://127.0.0.1:11434"
-    worker_model: str = "qwen2.5:1.5b"
-    skeptic_model: str = "qwen2.5:1.5b"
+    worker_model: str = "hf.co/TeichAI/Qwen3-4B-Thinking-2507-Claude-4.5-Opus-High-Reasoning-Distill-GGUF:Q3_K_S"
+    skeptic_model: str = "nemotron-mini:4b"
     worker_ctx: int = 8192
     skeptic_ctx: int = 4096
     timeout: float = 120.0

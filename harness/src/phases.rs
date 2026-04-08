@@ -10,6 +10,7 @@
 use crate::graph::SageGraph;
 use crate::schema::*;
 use crate::scorer;
+use serde::{Deserialize, Serialize};
 
 /// Phase identifiers
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,11 +145,7 @@ pub fn phase_audit(graph: &mut SageGraph) -> AuditSummary {
     let mut summary = AuditSummary::default();
 
     // Clone claim IDs to avoid borrow issues
-    let claim_ids: Vec<String> = graph
-        .claims()
-        .iter()
-        .map(|c| c.meta.id.clone())
-        .collect();
+    let claim_ids: Vec<String> = graph.claims().iter().map(|c| c.meta.id.clone()).collect();
 
     // Direct contradiction check: traverse all Refutes edges
     for claim_id in &claim_ids {
@@ -247,6 +244,69 @@ pub fn phase_skeptic_stub(graph: &mut SageGraph, config: &PhaseConfig) {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkepticDecision {
+    pub claim_id: String,
+    pub result: String,
+    pub confidence: f32,
+    pub critique: Option<String>,
+}
+
+/// Phase 6: apply Skeptic outcomes to Supported claims.
+/// confidence is interpreted as p_fail per spec.
+pub fn phase_skeptic_apply(
+    graph: &mut SageGraph,
+    config: &PhaseConfig,
+    decisions: &[SkepticDecision],
+) -> (u32, u32) {
+    let mut promoted = 0u32;
+    let mut disputed = 0u32;
+
+    for d in decisions {
+        let skeptic_result = match d.result.as_str() {
+            "Pass" => scorer::SkepticResult::Pass,
+            "Fail" => scorer::SkepticResult::Fail,
+            _ => scorer::SkepticResult::Inconclusive,
+        };
+
+        if let Some(NodeKind::Claim(claim)) = graph.get_node(&d.claim_id) {
+            if claim.status != ClaimStatus::Supported {
+                continue;
+            }
+        } else {
+            continue;
+        }
+
+        let can_promote = scorer::can_promote(
+            &d.claim_id,
+            skeptic_result,
+            graph,
+            config.diversity_min,
+            config.support_mass_min,
+        );
+
+        if can_promote {
+            if let Some(NodeKind::Claim(c)) = graph.get_node_mut(&d.claim_id) {
+                c.status = ClaimStatus::Verified;
+                let skeptic_confidence_correct = (1.0 - d.confidence).clamp(0.0, 1.0);
+                c.meta.belief_score =
+                    scorer::bayesian_update(c.meta.belief_score, skeptic_confidence_correct);
+                c.meta.source_entropy = 1.0 - c.meta.belief_score;
+                c.meta.touch();
+                promoted += 1;
+            }
+        } else if let Some(NodeKind::Claim(c)) = graph.get_node_mut(&d.claim_id) {
+            c.status = ClaimStatus::Disputed;
+            c.meta.belief_score = 0.0;
+            c.meta.source_entropy = 1.0;
+            c.meta.touch();
+            disputed += 1;
+        }
+    }
+
+    (promoted, disputed)
+}
+
 // ---------------------------------------------------------------------------
 // Phase 7: Monitor (simplified for Stage 1)
 // ---------------------------------------------------------------------------
@@ -284,9 +344,9 @@ pub fn phase_monitor(
         .map(|h| (h.meta.id.clone(), h.status, scorer::eig(h)))
         .collect();
 
-    let all_terminal = hyp_data.iter().all(|(_, s, _)| {
-        matches!(s, HypothesisStatus::Resolved | HypothesisStatus::Refuted)
-    });
+    let all_terminal = hyp_data
+        .iter()
+        .all(|(_, s, _)| matches!(s, HypothesisStatus::Resolved | HypothesisStatus::Refuted));
     if all_terminal && !hyp_data.is_empty() {
         return MonitorRouting::Converge;
     }
