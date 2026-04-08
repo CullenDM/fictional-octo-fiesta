@@ -215,17 +215,16 @@ HYPOTHESIS CONTEXT: {hypothesis_text}
 
 Respond in JSON:
 {{
-  "verdict": "Pass" or "Fail" or "Inconclusive",
-  "confidence": 0.0 to 1.0 (how confident you are in your verdict),
+  "result": "Pass" or "Fail" or "Inconclusive",
+  "confidence": 0.0 to 1.0 (p_fail: probability the claim is wrong),
   "critique": "One paragraph explaining your reasoning (max 300 chars)",
-  "p_fail": 0.0 to 1.0 (probability the claim is actually wrong)
 }}
 
 Rules:
 - Pass: Evidence clearly supports the claim
 - Fail: Evidence contradicts or is insufficient
 - Inconclusive: Cannot determine from available evidence
-- Be calibrated: high confidence requires strong evidence/counter-evidence
+- confidence MUST be p_fail (probability claim is wrong)
 - Keep critique concise and specific
 """
 
@@ -297,10 +296,9 @@ TEST OUTPUT:
 
 Respond in JSON:
 {{
-  "verdict": "Pass" or "Fail",
-  "confidence": 0.0 to 1.0,
+  "result": "Pass" or "Fail",
+  "confidence": 0.0 to 1.0 (p_fail: probability candidate is wrong),
   "critique": "Explanation if Fail (max 300 chars)",
-  "p_fail": 0.0 to 1.0,
   "contested_claims": ["claim_uuid_1", "claim_uuid_2"]
 }}
 
@@ -308,5 +306,5 @@ Rules:
 - Pass only if ALL supporting claims are consistent with the answer
 - Check for logical gaps, unsupported leaps, and contradictions
 - If tests exist and pass, weigh that heavily (but not conclusively)
-- p_fail is the probability the candidate is actually wrong
+- confidence MUST be p_fail (probability candidate is wrong)
 """

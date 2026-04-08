@@ -4,12 +4,13 @@
 //! phases is rejected by the Validator.  Phase transitions are logged to
 //! the audit trail with timestamps and round_id.
 //!
-//! Stage 1 routing: 1 → 2 → 3 → 4 → 5 → [stub 6] → 7 → route
-//! From 7: Continue → 2, Stall → 8 (stub), Converge → 9 → [stub 10] → emit
+//! Routing: 1 → 2 → 3 → 4 → 5 → 6 → 7 → route
+//! From 7: Continue → 2, Stall → 8 → 2, Converge → 9 → 10.
 
 use crate::graph::SageGraph;
 use crate::schema::*;
 use crate::scorer;
+use serde::{Deserialize, Serialize};
 
 /// Phase identifiers
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,11 +145,7 @@ pub fn phase_audit(graph: &mut SageGraph) -> AuditSummary {
     let mut summary = AuditSummary::default();
 
     // Clone claim IDs to avoid borrow issues
-    let claim_ids: Vec<String> = graph
-        .claims()
-        .iter()
-        .map(|c| c.meta.id.clone())
-        .collect();
+    let claim_ids: Vec<String> = graph.claims().iter().map(|c| c.meta.id.clone()).collect();
 
     // Direct contradiction check: traverse all Refutes edges
     for claim_id in &claim_ids {
@@ -210,45 +207,71 @@ pub struct AuditSummary {
     pub disputed_count: u32,
 }
 
-// ---------------------------------------------------------------------------
-// Phase 6: Skeptic STUB (Stage 1)
-// ---------------------------------------------------------------------------
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkepticDecision {
+    pub claim_id: String,
+    pub result: String,
+    pub confidence: f32,
+    pub critique: Option<String>,
+}
 
-/// Stage 1 stub: auto-promote all Supported claims to Verified.
-/// In Stage 2 this is replaced with real adversarial evaluation.
-pub fn phase_skeptic_stub(graph: &mut SageGraph, config: &PhaseConfig) {
-    let supported_ids: Vec<String> = graph
-        .claims()
-        .iter()
-        .filter(|c| c.status == ClaimStatus::Supported)
-        .map(|c| c.meta.id.clone())
-        .collect();
+/// Phase 6: apply Skeptic outcomes to Supported claims.
+/// confidence is interpreted as p_fail per spec.
+pub fn phase_skeptic_apply(
+    graph: &mut SageGraph,
+    config: &PhaseConfig,
+    decisions: &[SkepticDecision],
+) -> (u32, u32) {
+    let mut promoted = 0u32;
+    let mut disputed = 0u32;
 
-    for claim_id in supported_ids {
-        // Check promotion predicate with stub skeptic (always Pass)
+    for d in decisions {
+        let skeptic_result = match d.result.as_str() {
+            "Pass" => scorer::SkepticResult::Pass,
+            "Fail" => scorer::SkepticResult::Fail,
+            _ => scorer::SkepticResult::Inconclusive,
+        };
+
+        if let Some(NodeKind::Claim(claim)) = graph.get_node(&d.claim_id) {
+            if claim.status != ClaimStatus::Supported {
+                continue;
+            }
+        } else {
+            continue;
+        }
+
         let can_promote = scorer::can_promote(
-            &claim_id,
-            scorer::SkepticResult::Pass,
+            &d.claim_id,
+            skeptic_result,
             graph,
             config.diversity_min,
             config.support_mass_min,
         );
 
         if can_promote {
-            if let Some(NodeKind::Claim(c)) = graph.get_node_mut(&claim_id) {
+            if let Some(NodeKind::Claim(c)) = graph.get_node_mut(&d.claim_id) {
                 c.status = ClaimStatus::Verified;
-                // Bayesian update with stub confidence (§5.6)
-                c.meta.belief_score = scorer::bayesian_update(c.meta.belief_score, 0.9);
+                let skeptic_confidence_correct = (1.0 - d.confidence).clamp(0.0, 1.0);
+                c.meta.belief_score =
+                    scorer::bayesian_update(c.meta.belief_score, skeptic_confidence_correct);
                 c.meta.source_entropy = 1.0 - c.meta.belief_score;
                 c.meta.touch();
+                promoted += 1;
             }
+        } else if let Some(NodeKind::Claim(c)) = graph.get_node_mut(&d.claim_id) {
+            c.status = ClaimStatus::Disputed;
+            c.meta.belief_score = 0.0;
+            c.meta.source_entropy = 1.0;
+            c.meta.touch();
+            disputed += 1;
         }
-        // Claims that don't meet the promotion predicate stay Supported
     }
+
+    (promoted, disputed)
 }
 
 // ---------------------------------------------------------------------------
-// Phase 7: Monitor (simplified for Stage 1)
+// Phase 7: Monitor
 // ---------------------------------------------------------------------------
 
 /// Phase 7: Evaluate meta-state and determine routing.
@@ -284,9 +307,9 @@ pub fn phase_monitor(
         .map(|h| (h.meta.id.clone(), h.status, scorer::eig(h)))
         .collect();
 
-    let all_terminal = hyp_data.iter().all(|(_, s, _)| {
-        matches!(s, HypothesisStatus::Resolved | HypothesisStatus::Refuted)
-    });
+    let all_terminal = hyp_data
+        .iter()
+        .all(|(_, s, _)| matches!(s, HypothesisStatus::Resolved | HypothesisStatus::Refuted));
     if all_terminal && !hyp_data.is_empty() {
         return MonitorRouting::Converge;
     }
@@ -328,12 +351,36 @@ pub fn phase_monitor(
 }
 
 // ---------------------------------------------------------------------------
-// Phase 8: Reframe STUB (Stage 1)
+// Phase 8: Reframe
 // ---------------------------------------------------------------------------
 
-/// Stage 1 stub: just mark stalled hypotheses as Refuted and cascade stale.
-/// In Stage 2 this generates new hypotheses via the Worker.
-pub fn phase_reframe_stub(graph: &mut SageGraph) {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReframeClaimSeed {
+    pub claim_id: String,
+    pub text: String,
+    pub status: ClaimStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReframeSeed {
+    pub stalled_hypotheses: Vec<String>,
+    pub refuted_hypotheses: Vec<String>,
+    pub supported_claims: Vec<ReframeClaimSeed>,
+    pub unverified_claims: Vec<ReframeClaimSeed>,
+    pub disputed_claims: Vec<ReframeClaimSeed>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReframeHypothesisProposal {
+    pub text: String,
+    pub priority: f32,
+    pub test_id: Option<String>,
+}
+
+/// Deterministic Phase 8 preparation:
+/// - prune stalled hypotheses (mark Refuted + stale cascade)
+/// - extract reframe seed claims for the Worker
+pub fn phase_reframe_prepare(graph: &mut SageGraph) -> ReframeSeed {
     let stalled_ids: Vec<String> = graph
         .hypotheses()
         .iter()
@@ -341,13 +388,228 @@ pub fn phase_reframe_stub(graph: &mut SageGraph) {
         .map(|h| h.meta.id.clone())
         .collect();
 
-    for hyp_id in stalled_ids {
+    let refuted_hypotheses: Vec<String> = graph
+        .hypotheses()
+        .iter()
+        .filter(|h| h.status == HypothesisStatus::Refuted)
+        .map(|h| h.text.clone())
+        .collect();
+
+    for hyp_id in &stalled_ids {
         if let Some(NodeKind::Hypothesis(h)) = graph.get_node_mut(&hyp_id) {
             h.status = HypothesisStatus::Refuted;
             h.meta.touch();
         }
-        cascade_stale(graph, &hyp_id);
+        cascade_stale(graph, hyp_id);
     }
+
+    let mut supported_claims = Vec::new();
+    let mut unverified_claims = Vec::new();
+    let mut disputed_claims = Vec::new();
+
+    for c in graph.claims() {
+        let item = ReframeClaimSeed {
+            claim_id: c.meta.id.clone(),
+            text: c.text.clone(),
+            status: c.status,
+        };
+        match c.status {
+            ClaimStatus::Supported => supported_claims.push(item),
+            ClaimStatus::Unverified => unverified_claims.push(item),
+            ClaimStatus::Disputed => {
+                if graph.count_active_refutes(&c.meta.id) > 0 {
+                    disputed_claims.push(item);
+                }
+            }
+            ClaimStatus::Verified => {}
+        }
+    }
+
+    ReframeSeed {
+        stalled_hypotheses: stalled_ids,
+        refuted_hypotheses,
+        supported_claims,
+        unverified_claims,
+        disputed_claims,
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReframeInsertResult {
+    pub inserted: u32,
+    pub rejected_duplicate_or_empty: u32,
+}
+
+/// Deterministically inserts reframe proposals while preventing exact duplicates.
+/// Duplicate check is case-insensitive against all existing hypothesis texts.
+pub fn phase_reframe_insert(
+    graph: &mut SageGraph,
+    proposals: &[ReframeHypothesisProposal],
+) -> ReframeInsertResult {
+    let mut existing: std::collections::HashSet<String> = graph
+        .hypotheses()
+        .iter()
+        .map(|h| h.text.trim().to_lowercase())
+        .collect();
+    let round_id = graph.current_round;
+
+    let mut inserted = 0u32;
+    let mut rejected = 0u32;
+
+    for p in proposals {
+        let text_norm = p.text.trim().to_lowercase();
+        if text_norm.is_empty() || existing.contains(&text_norm) {
+            rejected += 1;
+            continue;
+        }
+        let node = NodeKind::Hypothesis(HypothesisNode {
+            meta: NodeMeta::new(round_id, 0.0),
+            text: p.text.trim().to_string(),
+            status: HypothesisStatus::Open,
+            priority: p.priority.clamp(0.0, 1.0),
+            stall_count: 0,
+            max_reopen: 2,
+            reopen_count: 0,
+            test_id: p.test_id.clone(),
+        });
+        graph.add_node(node);
+        existing.insert(text_norm);
+        inserted += 1;
+    }
+
+    ReframeInsertResult {
+        inserted,
+        rejected_duplicate_or_empty: rejected,
+    }
+}
+
+/// Final Verify response coherence check.
+pub fn validate_final_verify_decision(result: &str, p_fail: f32, delta: f32) -> Result<(), String> {
+    if !(0.0..=1.0).contains(&p_fail) {
+        return Err(format!("p_fail out of range: {}", p_fail));
+    }
+    match result {
+        "Pass" if p_fail < delta => Ok(()),
+        "Fail" if p_fail >= delta => Ok(()),
+        "Pass" => Err(format!(
+            "Incoherent Final Verify: Pass with p_fail {} >= delta {}",
+            p_fail, delta
+        )),
+        "Fail" => Err(format!(
+            "Incoherent Final Verify: Fail with p_fail {} < delta {}",
+            p_fail, delta
+        )),
+        other => Err(format!("Unknown Final Verify result: {}", other)),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FinalVerifyDecision {
+    pub candidate_id: String,
+    pub result: String,
+    pub confidence: f32, // p_fail
+    pub contested_claim_ids: Vec<String>,
+    pub critique: String,
+    pub delta: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FinalVerifyApplyResult {
+    pub outcome: String, // pass | reopen | emit_with_uncertainty
+    pub contradiction_id: Option<String>,
+    pub reopen_count: u8,
+    pub max_reopen_count: u8,
+    pub reopened_hypothesis_ids: Vec<String>,
+}
+
+/// Apply Final Verify decision deterministically in the harness.
+/// - Validates coherence constraints for result/p_fail.
+/// - On Fail, creates ContradictionNode + Invalidates edge.
+/// - Handles reopen ceiling and candidate reopen_count updates.
+pub fn phase_final_verify_apply(
+    graph: &mut SageGraph,
+    decision: &FinalVerifyDecision,
+) -> Result<FinalVerifyApplyResult, String> {
+    validate_final_verify_decision(&decision.result, decision.confidence, decision.delta)?;
+
+    let Some(NodeKind::CandidateAnswer(candidate_view)) = graph.get_node(&decision.candidate_id) else {
+        return Err(format!(
+            "CandidateAnswer not found for candidate_id={}",
+            decision.candidate_id
+        ));
+    };
+    let current_reopen = candidate_view.reopen_count;
+    let max_reopen = candidate_view.max_reopen_count;
+
+    if decision.result == "Pass" {
+        return Ok(FinalVerifyApplyResult {
+            outcome: "pass".to_string(),
+            contradiction_id: None,
+            reopen_count: current_reopen,
+            max_reopen_count: max_reopen,
+            reopened_hypothesis_ids: vec![],
+        });
+    }
+
+    if current_reopen >= max_reopen {
+        return Ok(FinalVerifyApplyResult {
+            outcome: "emit_with_uncertainty".to_string(),
+            contradiction_id: None,
+            reopen_count: current_reopen,
+            max_reopen_count: max_reopen,
+            reopened_hypothesis_ids: vec![],
+        });
+    }
+
+    let round_id = graph.current_round;
+    let contradiction = ContradictionNode {
+        meta: NodeMeta::new(round_id, 0.0),
+        critique: decision.critique.chars().take(300).collect(),
+        source: ContradictionSource::FinalVerifySkeptic,
+        contested_claims: decision.contested_claim_ids.clone(),
+        skeptic_p_fail: decision.confidence.clamp(0.0, 1.0),
+    };
+    let contradiction_id = contradiction.meta.id.clone();
+    graph.add_node(NodeKind::Contradiction(contradiction));
+    graph.add_edge(&contradiction_id, &decision.candidate_id, EdgeKind::Invalidates)?;
+
+    if let Some(NodeKind::CandidateAnswer(c)) = graph.get_node_mut(&decision.candidate_id) {
+        c.reopen_count = c.reopen_count.saturating_add(1);
+        c.meta.belief_score = 0.0;
+        c.meta.source_entropy = 1.0;
+        c.meta.touch();
+    }
+
+    // Re-open parent hypothesis if we can find a Proposes(Hypothesis -> Candidate) edge.
+    let proposer_hyp_ids: Vec<String> = graph
+        .incoming_neighbors(&decision.candidate_id)
+        .into_iter()
+        .filter_map(|(node, edge)| match (node, edge) {
+            (NodeKind::Hypothesis(_), EdgeKind::Proposes) => Some(node.id().to_string()),
+            _ => None,
+        })
+        .collect();
+
+    for hyp_id in &proposer_hyp_ids {
+        if let Some(NodeKind::Hypothesis(h)) = graph.get_node_mut(&hyp_id) {
+            h.status = HypothesisStatus::Open;
+            h.reopen_count = h.reopen_count.saturating_add(1);
+            h.meta.touch();
+        }
+    }
+
+    let updated_reopen = match graph.get_node(&decision.candidate_id) {
+        Some(NodeKind::CandidateAnswer(c)) => c.reopen_count,
+        _ => current_reopen,
+    };
+
+    Ok(FinalVerifyApplyResult {
+        outcome: "reopen".to_string(),
+        contradiction_id: Some(contradiction_id),
+        reopen_count: updated_reopen,
+        max_reopen_count: max_reopen,
+        reopened_hypothesis_ids: proposer_hyp_ids,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -386,16 +648,6 @@ pub fn phase_bank(graph: &mut SageGraph) -> Vec<(String, f32, f32)> {
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     scored
-}
-
-// ---------------------------------------------------------------------------
-// Phase 10: Final Verify STUB (Stage 1)
-// ---------------------------------------------------------------------------
-
-/// Stage 1 stub: auto-pass.
-/// Returns true (pass) always.  In Stage 2 this runs the Skeptic.
-pub fn phase_final_verify_stub() -> bool {
-    true
 }
 
 #[cfg(test)]

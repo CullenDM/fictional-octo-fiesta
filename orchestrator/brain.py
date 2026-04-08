@@ -220,7 +220,7 @@ async def compress(
 
 
 # ---------------------------------------------------------------------------
-# Phase 6: Skeptic (Stage 1 = stub, Stage 2 = real)
+# Phase 6: Skeptic
 # ---------------------------------------------------------------------------
 
 async def skeptic_evaluate(
@@ -228,21 +228,10 @@ async def skeptic_evaluate(
     claim_text: str,
     evidence_snippets: str,
     hypothesis_text: str,
-    use_stub: bool = True,
 ) -> dict[str, Any]:
     """
     Phase 6: Adversarial evaluation of a claim.
-    Stage 1 stub: always returns Pass with confidence 0.1
     """
-    if use_stub:
-        return {
-            "verdict": "Pass",
-            "confidence": 0.1,
-            "critique": "Stage 1 stub — Skeptic auto-pass",
-            "p_fail": 0.0,
-            "tokens": 0,
-        }
-
     prompt = prompts.render_skeptic_prompt(
         claim_text, evidence_snippets, hypothesis_text
     )
@@ -257,16 +246,15 @@ async def skeptic_evaluate(
     parsed = result.get("parsed", {})
 
     return {
-        "verdict": parsed.get("verdict", "Inconclusive"),
-        "confidence": float(parsed.get("confidence", 0.5)),
+        "result": parsed.get("result", parsed.get("verdict", "Inconclusive")),
+        "confidence": float(parsed.get("confidence", parsed.get("p_fail", 0.5))),
         "critique": str(parsed.get("critique", ""))[:300],
-        "p_fail": float(parsed.get("p_fail", 0.5)),
         "tokens": result.get("tokens", 0),
     }
 
 
 # ---------------------------------------------------------------------------
-# Phase 10: Final Verify (stub)
+# Phase 10: Final Verify
 # ---------------------------------------------------------------------------
 
 async def final_verify(
@@ -275,21 +263,10 @@ async def final_verify(
     supporting_claims: str,
     test_output: str,
     task_prompt: str,
-    use_stub: bool = True,
 ) -> dict[str, Any]:
     """
     Phase 10: Final adversarial verification.
-    Stage 1 stub: always passes.
     """
-    if use_stub:
-        return {
-            "verdict": "Pass",
-            "confidence": 1.0,
-            "critique": "",
-            "p_fail": 0.0,
-            "tokens": 0,
-        }
-
     prompt = prompts.render_final_verify_prompt(
         candidate_content, supporting_claims, test_output, task_prompt
     )
@@ -303,10 +280,50 @@ async def final_verify(
 
     parsed = result.get("parsed", {})
     return {
-        "verdict": parsed.get("verdict", "Fail"),
-        "confidence": float(parsed.get("confidence", 0.5)),
+        "result": parsed.get("result", parsed.get("verdict", "Fail")),
+        "confidence": float(parsed.get("confidence", parsed.get("p_fail", 0.5))),
         "critique": str(parsed.get("critique", ""))[:300],
-        "p_fail": float(parsed.get("p_fail", 0.5)),
         "contested_claims": parsed.get("contested_claims", []),
         "tokens": result.get("tokens", 0),
     }
+
+
+async def reframe(
+    client: OllamaClient,
+    task_prompt: str,
+    refuted_hypotheses: list[str],
+    stalled_hypotheses: list[str],
+    seed_summary_json: str,
+) -> dict[str, Any]:
+    """
+    Phase 8 Worker call: generate structurally distinct hypotheses from reframe seed.
+    """
+    prompt = prompts.render_reframe_prompt(
+        task_prompt=task_prompt,
+        refuted_hypotheses=json.dumps(refuted_hypotheses, indent=2),
+        stalled_hypotheses=json.dumps(stalled_hypotheses, indent=2),
+        graph_summary=seed_summary_json,
+    )
+    result = await client.generate_json(
+        prompt=prompt,
+        role="worker",
+        system_prompt="You are GREAT SAGE's reframing strategist.",
+        temperature=0.4,
+    )
+    parsed = result.get("parsed", {})
+    hypotheses = []
+    for h in parsed.get("hypotheses", []):
+        if not isinstance(h, dict):
+            continue
+        text = str(h.get("text", "")).strip()
+        if not text:
+            continue
+        hypotheses.append(
+            {
+                "text": text,
+                "priority": float(h.get("priority", 0.6)),
+                "test_id": h.get("test_id"),
+            }
+        )
+
+    return {"hypotheses": hypotheses, "tokens": result.get("tokens", 0)}

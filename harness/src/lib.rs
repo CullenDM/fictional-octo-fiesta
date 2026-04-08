@@ -153,16 +153,49 @@ impl HarnessState {
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Serialize: {}", e)))
     }
 
+    /// Get Supported claims with their supporting evidence snippets.
+    /// Used by Python orchestrator for Phase 6 Skeptic calls.
+    fn get_supported_claims_json(&self) -> PyResult<String> {
+        let g = self.graph.read().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Lock poisoned: {}", e))
+        })?;
+
+        let mut out = Vec::new();
+        for claim in g.claims() {
+            if claim.status != ClaimStatus::Supported {
+                continue;
+            }
+
+            let evidence_snippets: Vec<serde_json::Value> = g
+                .get_supporting_evidence(&claim.meta.id)
+                .iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "evidence_id": e.meta.id,
+                        "snippet": e.snippet,
+                        "source_id": e.source_id,
+                    })
+                })
+                .collect();
+
+            out.push(serde_json::json!({
+                "claim_id": claim.meta.id,
+                "claim_text": claim.text,
+                "evidence": evidence_snippets
+            }));
+        }
+
+        serde_json::to_string(&out)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Serialize: {}", e)))
+    }
+
     /// Get all node IDs currently in the graph (for tmp-ref validation)
     fn get_all_node_ids(&self) -> PyResult<Vec<String>> {
         let g = self.graph.read().map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Lock poisoned: {}", e))
         })?;
 
-        Ok(g.graph
-            .node_weights()
-            .map(|n| n.id().to_string())
-            .collect())
+        Ok(g.graph.node_weights().map(|n| n.id().to_string()).collect())
     }
 
     // -----------------------------------------------------------------------
@@ -282,10 +315,7 @@ impl HarnessState {
         // Add evidence
         if let Some(evidence) = resolved.get("new_evidence").and_then(|v| v.as_array()) {
             for ev_val in evidence {
-                let tmp_id = ev_val
-                    .get("tmp_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let tmp_id = ev_val.get("tmp_id").and_then(|v| v.as_str()).unwrap_or("");
                 let real_id = tmp_map
                     .get(tmp_id)
                     .cloned()
@@ -307,12 +337,7 @@ impl HarnessState {
                 let source_id = ev_val
                     .get("source_id")
                     .and_then(|v| v.as_str())
-                    .map(|s| {
-                        tmp_map
-                            .get(s)
-                            .cloned()
-                            .unwrap_or_else(|| s.to_string())
-                    })
+                    .map(|s| tmp_map.get(s).cloned().unwrap_or_else(|| s.to_string()))
                     .unwrap_or_else(|| {
                         // Auto-create source if needed
                         let sid = uuid::Uuid::new_v4().to_string();
@@ -403,14 +428,8 @@ impl HarnessState {
                     .get("from_id")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let to_id = edge_val
-                    .get("to_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let kind_str = edge_val
-                    .get("kind")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let to_id = edge_val.get("to_id").and_then(|v| v.as_str()).unwrap_or("");
+                let kind_str = edge_val.get("kind").and_then(|v| v.as_str()).unwrap_or("");
 
                 let kind = match kind_str {
                     "Supports" => EdgeKind::Supports,
@@ -423,8 +442,7 @@ impl HarnessState {
                 };
 
                 if let Err(e) = g.add_edge(from_id, to_id, kind) {
-                    self.audit
-                        .log_rejection(round_id, phase, "V-02", &e);
+                    self.audit.log_rejection(round_id, phase, "V-02", &e);
                     // Non-fatal: log and continue with remaining edges
                 }
             }
@@ -445,8 +463,7 @@ impl HarnessState {
             }
         }
 
-        self.audit
-            .log_mutation(round_id, phase, new_ids.clone());
+        self.audit.log_mutation(round_id, phase, new_ids.clone());
 
         Ok((true, "Applied successfully".to_string(), new_ids))
     }
@@ -497,11 +514,10 @@ impl HarnessState {
         let summary = phases::phase_audit(&mut g);
 
         self.audit.log(
-            &audit::AuditEntry::new(round_id, 5, "audit_complete")
-                .with_detail(&format!(
-                    "contradictions={}, stale={}, disputed={}",
-                    summary.contradiction_count, summary.stale_count, summary.disputed_count
-                )),
+            &audit::AuditEntry::new(round_id, 5, "audit_complete").with_detail(&format!(
+                "contradictions={}, stale={}, disputed={}",
+                summary.contradiction_count, summary.stale_count, summary.disputed_count
+            )),
         );
 
         Ok(serde_json::to_string(&serde_json::json!({
@@ -512,13 +528,29 @@ impl HarnessState {
         .unwrap())
     }
 
-    /// Phase 6: Skeptic STUB — auto-promote Supported → Verified
-    fn run_phase_skeptic_stub(&self) -> PyResult<()> {
+    /// Phase 6: apply Skeptic outcomes (Stage 2 path).
+    /// decisions_json: [{"claim_id","result","confidence","critique"}]
+    fn run_phase_skeptic(&self, decisions_json: &str) -> PyResult<String> {
+        let decisions: Vec<phases::SkepticDecision> = serde_json::from_str(decisions_json)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON: {}", e)))?;
+
         let mut g = self.graph.write().map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Lock poisoned: {}", e))
         })?;
-        phases::phase_skeptic_stub(&mut g, &self.config);
-        Ok(())
+
+        let (promoted, disputed) = phases::phase_skeptic_apply(&mut g, &self.config, &decisions);
+        let round_id = g.current_round;
+
+        self.audit.log(
+            &audit::AuditEntry::new(round_id, 6, "skeptic_applied")
+                .with_detail(&format!("promoted={}, disputed={}", promoted, disputed)),
+        );
+
+        Ok(serde_json::json!({
+            "promoted": promoted,
+            "disputed": disputed
+        })
+        .to_string())
     }
 
     /// Phase 7: Monitor — evaluate routing decision
@@ -529,8 +561,8 @@ impl HarnessState {
         all_tests_pass: bool,
         prev_eigs_json: &str,
     ) -> PyResult<String> {
-        let prev_eigs: Vec<(String, f32)> = serde_json::from_str(prev_eigs_json)
-            .unwrap_or_default();
+        let prev_eigs: Vec<(String, f32)> =
+            serde_json::from_str(prev_eigs_json).unwrap_or_default();
 
         let mut g = self.graph.write().map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Lock poisoned: {}", e))
@@ -557,13 +589,62 @@ impl HarnessState {
         Ok(decision.to_string())
     }
 
-    /// Phase 8: Reframe STUB — mark stalled as Refuted
-    fn run_phase_reframe_stub(&self) -> PyResult<()> {
+    /// Phase 8: deterministic reframe seed preparation.
+    /// Prunes stalled branches and returns the reframe seed JSON.
+    fn run_phase_reframe_prepare(&self) -> PyResult<String> {
         let mut g = self.graph.write().map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Lock poisoned: {}", e))
         })?;
-        phases::phase_reframe_stub(&mut g);
-        Ok(())
+        let seed = phases::phase_reframe_prepare(&mut g);
+        serde_json::to_string(&seed)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Serialize: {}", e)))
+    }
+
+    /// Phase 8: insert Worker-proposed reframe hypotheses deterministically.
+    /// proposals_json: [{"text","priority","test_id"}]
+    fn run_phase_reframe_insert(&self, proposals_json: &str) -> PyResult<String> {
+        let proposals: Vec<phases::ReframeHypothesisProposal> = serde_json::from_str(proposals_json)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON: {}", e)))?;
+
+        let mut g = self.graph.write().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Lock poisoned: {}", e))
+        })?;
+        let result = phases::phase_reframe_insert(&mut g, &proposals);
+        serde_json::to_string(&result)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Serialize: {}", e)))
+    }
+
+    /// Phase 10 deterministic final-verify mutation application.
+    /// decision_json fields:
+    /// {candidate_id,result,confidence,contested_claim_ids,critique,delta}
+    fn run_phase_final_verify_apply(&self, decision_json: &str) -> PyResult<String> {
+        let decision: phases::FinalVerifyDecision = serde_json::from_str(decision_json)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON: {}", e)))?;
+
+        let mut g = self.graph.write().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Lock poisoned: {}", e))
+        })?;
+        let round_id = g.current_round;
+
+        match phases::phase_final_verify_apply(&mut g, &decision) {
+            Ok(result) => {
+                self.audit.log(
+                    &audit::AuditEntry::new(round_id, 10, "final_verify_applied")
+                        .with_detail(&format!("candidate_id={}, outcome={}", decision.candidate_id, result.outcome)),
+                );
+                serde_json::to_string(&result)
+                    .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Serialize: {}", e)))
+            }
+            Err(e) => {
+                self.audit.log_rejection(round_id, 10, "V-10-FINAL", &e);
+                Ok(serde_json::json!({
+                    "outcome": "rejected",
+                    "error": e,
+                    "contradiction_id": null
+                })
+                .to_string())
+            }
+        }
     }
 
     /// Phase 9: Bank — score candidates, return ranked list
@@ -573,15 +654,27 @@ impl HarnessState {
         })?;
 
         let scored = phases::phase_bank(&mut g);
+        let round_id = g.current_round;
 
         let result: Vec<serde_json::Value> = scored
             .iter()
-            .map(|(id, s_a, cs)| {
-                serde_json::json!({
+            .filter_map(|(id, s_a, cs)| {
+                let Some(NodeKind::CandidateAnswer(c)) = g.get_node(id) else {
+                    return None;
+                };
+                let validation = validator::validate_candidate_for_banking(&c.content);
+                if !validation.passed {
+                    for v in validation.violations {
+                        self.audit.log_rejection(round_id, 9, &v.check_id, &v.message);
+                    }
+                    return None;
+                }
+
+                Some(serde_json::json!({
                     "id": id,
                     "s_a": s_a,
                     "contradiction_score": cs
-                })
+                }))
             })
             .collect();
 
@@ -611,8 +704,7 @@ impl HarnessState {
         let filename = format!("snapshot_round_{}.json", g.current_round);
         let path = self.snapshot_dir.join(&filename);
 
-        snapshot::save_snapshot(&g, &path)
-            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e))?;
+        snapshot::save_snapshot(&g, &path).map_err(|e| pyo3::exceptions::PyIOError::new_err(e))?;
 
         Ok(path.to_string_lossy().to_string())
     }

@@ -10,17 +10,31 @@ Handles:
 import asyncio
 import json
 import logging
+import os
+from pathlib import Path
 import re
 import subprocess
 import time
+from urllib.parse import urlparse
+import ipaddress
 from dataclasses import dataclass
 from typing import Any
 
-from bs4 import BeautifulSoup
-import html2text
 import httpx
 
 logger = logging.getLogger("great_sage.tools")
+REPO_ROOT = Path(".").resolve()
+DISALLOWED_COMMAND_PATTERNS = [
+    r"\brm\s+-rf\b",
+    r"\bsudo\b",
+    r"\bchmod\s+777\b",
+    r"\bchown\b",
+    r"\bmkfs\b",
+    r"\bdd\s+if=",
+    r"\bcurl\b.*\|\s*(bash|sh)",
+    r"\bwget\b.*\|\s*(bash|sh)",
+    r":\(\)\s*\{",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -66,22 +80,37 @@ def execute_code_run(
     Parses pytest output for test pass/fail counts.
     """
     start = time.monotonic()
+    safe, reason = _validate_command(command)
+    if not safe:
+        return CodeRunResult("", f"Blocked unsafe command: {reason}", -3, [], [], 0)
+
+    safe_working_dir = _safe_working_dir(working_dir)
+    if safe_working_dir is None:
+        return CodeRunResult(
+            "",
+            f"Blocked working directory outside repository: {working_dir}",
+            -4,
+            [],
+            [],
+            0,
+        )
 
     try:
         proc = subprocess.run(
-            command,
-            shell=True,
+            ["bash", "-lc", command],
+            shell=False,
             capture_output=True,
             text=True,
             timeout=timeout_secs,
-            cwd=working_dir,
+            cwd=str(safe_working_dir),
+            env=_safe_env(),
         )
         duration_ms = int((time.monotonic() - start) * 1000)
 
         stdout = proc.stdout or ""
         stderr = proc.stderr or ""
 
-        tests_passed, tests_failed = parse_pytest_output(stdout + "\n" + stderr)
+        tests_passed, tests_failed = parse_test_output(stdout + "\n" + stderr)
 
         return CodeRunResult(
             stdout=stdout[-5000:],  # cap at 5KB
@@ -115,16 +144,53 @@ def execute_code_run(
         )
 
 
-def parse_pytest_output(output: str) -> tuple[list[str], list[str]]:
-    """
-    Parse pytest output to extract passed/failed test names.
-    Handles standard pytest verbose output format.
+def _safe_env() -> dict[str, str]:
+    keep_keys = {"PATH", "HOME", "LANG", "LC_ALL", "PYTHONPATH"}
+    env = {k: v for k, v in os.environ.items() if k in keep_keys}
+    env["PYTHONUNBUFFERED"] = "1"
+    return env
 
-    NOTE: Stage 1 — Python/pytest only.
-    Future: auto-detect test runner or model-declared language.
+
+def _safe_working_dir(working_dir: str) -> Path | None:
+    resolved = (REPO_ROOT / working_dir).resolve()
+    try:
+        resolved.relative_to(REPO_ROOT)
+        return resolved
+    except ValueError:
+        return None
+
+
+def _validate_command(command: str) -> tuple[bool, str]:
+    if not command.strip():
+        return False, "empty command"
+    if len(command) > 500:
+        return False, "command too long"
+    if "\n" in command or "\r" in command:
+        return False, "multiline command not allowed"
+    for pat in DISALLOWED_COMMAND_PATTERNS:
+        if re.search(pat, command, re.IGNORECASE):
+            return False, f"disallowed pattern matched: {pat}"
+    return True, ""
+
+
+def _is_private_or_loopback_host(host: str) -> bool:
+    normalized = host.strip().lower()
+    if normalized in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    try:
+        ip = ipaddress.ip_address(normalized)
+        return ip.is_private or ip.is_loopback or ip.is_link_local
+    except ValueError:
+        return normalized.endswith(".local")
+
+
+def parse_test_output(output: str) -> tuple[list[str], list[str]]:
     """
-    passed = []
-    failed = []
+    Parse test output to extract passed/failed test names.
+    Supports pytest, cargo test, go test, and jest-like summaries.
+    """
+    passed: list[str] = []
+    failed: list[str] = []
 
     # Match individual test results: "test_file.py::test_name PASSED/FAILED"
     for match in re.finditer(
@@ -137,17 +203,75 @@ def parse_pytest_output(output: str) -> tuple[list[str], list[str]]:
         elif status in ("FAILED", "ERROR"):
             failed.append(test_name)
 
-    # Fallback: summary line "X passed, Y failed"
-    if not passed and not failed:
-        summary = re.search(r"(\d+)\s+passed", output)
-        if summary:
-            passed = [f"test_{i}" for i in range(int(summary.group(1)))]
+    # cargo test lines: "test module::name ... ok/FAILED"
+    for match in re.finditer(
+        r"test\s+([A-Za-z0-9_:]+)\s+\.\.\.\s+(ok|FAILED)", output
+    ):
+        test_name = match.group(1)
+        status = match.group(2)
+        if status == "ok":
+            passed.append(test_name)
+        else:
+            failed.append(test_name)
 
-        fail_summary = re.search(r"(\d+)\s+failed", output)
-        if fail_summary:
-            failed = [f"test_fail_{i}" for i in range(int(fail_summary.group(1)))]
+    # go test lines: "--- PASS|FAIL: TestName"
+    for match in re.finditer(r"---\s+(PASS|FAIL):\s+([A-Za-z0-9_./-]+)", output):
+        status = match.group(1)
+        test_name = match.group(2)
+        if status == "PASS":
+            passed.append(test_name)
+        else:
+            failed.append(test_name)
+
+    # Jest/Vitest style line items: "✓ test name" or "✕ test name"
+    for match in re.finditer(r"^\s*([✓✕])\s+(.+)$", output, re.MULTILINE):
+        status = match.group(1)
+        test_name = match.group(2).strip()
+        if status == "✓":
+            passed.append(test_name)
+        else:
+            failed.append(test_name)
+
+    # Fallback summary extraction from common runners.
+    if not passed and not failed:
+        pass_count = _extract_count(
+            output,
+            [
+                r"(\d+)\s+passed",
+                r"(\d+)\s+tests?\s+passed",
+                r"test result: ok\.\s+(\d+)\s+passed",
+            ],
+        )
+        fail_count = _extract_count(
+            output,
+            [
+                r"(\d+)\s+failed",
+                r"(\d+)\s+tests?\s+failed",
+                r"test result: .*?(\d+)\s+failed",
+            ],
+        )
+        passed = [f"test_{i}" for i in range(pass_count)]
+        failed = [f"test_fail_{i}" for i in range(fail_count)]
 
     return passed, failed
+
+
+def _extract_count(output: str, patterns: list[str]) -> int:
+    for pattern in patterns:
+        summary = re.search(pattern, output, flags=re.IGNORECASE)
+        if not summary:
+            continue
+        value = summary.group(1)
+        if value.isdigit():
+            return int(value)
+    return 0
+
+
+def parse_pytest_output(output: str) -> tuple[list[str], list[str]]:
+    """
+    Backward-compatible alias; now delegates to the multi-runner parser.
+    """
+    return parse_test_output(output)
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +345,7 @@ STRUCTURAL_TAGS = {
 }
 
 
-def decompose_dom(soup: BeautifulSoup, max_depth: int = 4, depth: int = 0) -> list[PageElement]:
+def decompose_dom(soup: Any, max_depth: int = 4, depth: int = 0) -> list[PageElement]:
     """
     Decompose HTML into a structured tree of headings, text blocks,
     and interactable elements.  Non-structural/non-interactable tags
@@ -279,6 +403,17 @@ async def execute_visit(url: str, timeout: float = 15.0) -> dict[str, Any]:
     Returns both human-readable content and machine-parseable tree.
     """
     try:
+        from bs4 import BeautifulSoup
+        import html2text
+
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("Only http/https URLs are allowed")
+        if not parsed.hostname:
+            raise ValueError("Missing hostname")
+        if _is_private_or_loopback_host(parsed.hostname):
+            raise ValueError("Private and loopback hosts are blocked")
+
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(timeout),
             follow_redirects=True,

@@ -148,7 +148,11 @@ def main():
 
     print()
     print("=== Test 5: Tool Executor ===")
-    from orchestrator.tool_executor import execute_code_run, parse_pytest_output
+    from orchestrator.tool_executor import (
+        execute_code_run,
+        parse_pytest_output,
+        parse_test_output,
+    )
 
     result = execute_code_run("echo 'hello world'", ".", 5)
     print(f"CodeRun: exit={result.exit_code} stdout={result.stdout.strip()}")
@@ -166,6 +170,15 @@ test_math.py::test_divide FAILED
     print(f"Pytest parser: {len(passed)} passed, {len(failed)} failed")
     assert len(passed) == 2
     assert len(failed) == 1
+
+    # Test cross-runner parser behavior (cargo/go/jest-like output)
+    cargo_output = """
+test phases::tests::test_phase_score ... ok
+test phases::tests::test_monitor_continue_normal ... FAILED
+"""
+    passed, failed = parse_test_output(cargo_output)
+    assert "phases::tests::test_phase_score" in passed
+    assert "phases::tests::test_monitor_continue_normal" in failed
 
     print()
     print("=" * 50)
