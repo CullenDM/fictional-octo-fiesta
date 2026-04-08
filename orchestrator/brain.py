@@ -264,6 +264,47 @@ async def skeptic_evaluate(
 
 
 # ---------------------------------------------------------------------------
+# Pre-Phase 9: Synthesize implementation from Verified claims
+# ---------------------------------------------------------------------------
+
+async def synthesize(
+    client: OllamaClient,
+    task_prompt: str,
+    verified_claims_json: str,
+    language: str = "python",
+    test_code: str = "",
+) -> dict[str, Any]:
+    """
+    Pre-Phase 9: Given Verified claims, generate a concrete implementation.
+    Returns {"implementation": "code string", "filename": "path", "tokens": N}.
+    """
+    prompt = prompts.render_synthesize_prompt(
+        task_prompt, verified_claims_json, language, test_code
+    )
+
+    result = await client.generate_json(
+        prompt=prompt,
+        role="worker",
+        system_prompt=(
+            "You are GREAT SAGE's code synthesis engine. "
+            "Output only valid JSON with 'implementation' and 'filename' keys."
+        ),
+        temperature=0.2,
+    )
+
+    parsed = result.get("parsed", {})
+    impl = str(parsed.get("implementation", ""))
+    filename = str(parsed.get("filename", "solution.py"))
+
+    logger.info(f"Synthesize: {len(impl)} chars → {filename}, {result.get('tokens', 0)} tokens")
+    return {
+        "implementation": impl,
+        "filename": filename,
+        "tokens": result.get("tokens", 0),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Phase 10: Final Verify (stub)
 # ---------------------------------------------------------------------------
 

@@ -230,6 +230,42 @@ Rules:
 
 
 # ---------------------------------------------------------------------------
+# §8.4.5 Synthesize (pre-Phase 9) — generate implementation from Verified claims
+# ---------------------------------------------------------------------------
+
+def render_synthesize_prompt(
+    task_prompt: str,
+    verified_claims_json: str,
+    language: str = "python",
+    test_code: str = "",
+) -> str:
+    test_section = f"\nTESTS TO PASS:\n```{language}\n{test_code}\n```" if test_code else ""
+    return f"""You are a code synthesis engine.  Given verified factual claims about what
+an implementation must do, write the implementation that satisfies all claims.
+
+TASK:
+{task_prompt}
+
+VERIFIED CLAIMS (all must hold in your implementation):
+{verified_claims_json}
+{test_section}
+
+Respond in JSON:
+{{
+  "implementation": "complete file content as a string",
+  "filename": "relative path to write (e.g. solution.py)"
+}}
+
+Rules:
+- Write a complete, runnable file — not pseudocode, not snippets
+- Every Verified claim must be satisfied by the implementation
+- If tests are provided, the implementation must pass all of them
+- Output ONLY the JSON object — no markdown fences, no explanation outside the JSON
+- Do NOT include id, created_at, belief_score, or any harness fields
+"""
+
+
+# ---------------------------------------------------------------------------
 # §8.5 Reframe (Phase 8) — Stage 2 only
 # ---------------------------------------------------------------------------
 

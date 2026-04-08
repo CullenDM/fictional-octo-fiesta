@@ -20,7 +20,7 @@ thresholds:
   stall_count: 2                 # Rounds of stalling before Reframe
   convergence_sa: 0.85           # S_A threshold for "good enough"
   diversity_min: 0.50            # Min diversity index for promotion
-  support_mass_min: 1.00         # Min support mass for promotion
+  support_mass_min: 0.90         # Min support mass for promotion (single TestVerified evidence = 0.95)
   reopen_max: 2                  # Max times a candidate can reopen
   redundancy_pct: 0.60           # Redundancy threshold for context pruning
 

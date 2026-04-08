@@ -630,6 +630,34 @@ impl HarnessState {
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Serialize: {}", e)))
     }
 
+    /// Register a CandidateAnswerNode in the graph from a synthesized implementation.
+    /// Returns the new node's UUID.
+    fn add_candidate(
+        &self,
+        content: String,
+        supporting_claim_ids: Vec<String>,
+    ) -> PyResult<String> {
+        let mut g = self.graph.write().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Lock poisoned: {}", e))
+        })?;
+
+        let round_id = g.current_round;
+        let node = NodeKind::CandidateAnswer(CandidateAnswerNode {
+            meta: NodeMeta::new(round_id, 0.0),
+            content,
+            supporting_claims: supporting_claim_ids,
+            contradiction_score: 0.0,
+            max_reopen_count: 2,
+            reopen_count: 0,
+        });
+
+        let id = node.id().to_string();
+        g.add_node(node);
+
+        self.audit.log_mutation(round_id, 9, vec![id.clone()]);
+        Ok(id)
+    }
+
     /// Increment the round counter
     fn advance_round(&self) -> PyResult<u32> {
         let mut g = self.graph.write().map_err(|e| {

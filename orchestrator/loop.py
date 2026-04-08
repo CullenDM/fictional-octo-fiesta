@@ -361,6 +361,55 @@ async def run_great_sage(
             state.advance_round()
 
         # ===================================================================
+        # Synthesis: generate implementation from Verified claims
+        # ===================================================================
+        logger.info("\n── Synthesis ──")
+        verified_json = state.get_verified_claims_json()
+        verified_claims = json.loads(verified_json)
+        candidate_content_map: dict[str, str] = {}
+
+        if is_code_task and verified_claims:
+            synthesis = await brain.synthesize(
+                ollama, task_prompt, verified_json, language, test_code
+            )
+            total_tokens += synthesis.get("tokens", 0)
+
+            impl_code = synthesis.get("implementation", "")
+            impl_filename = synthesis.get("filename", "solution.py")
+
+            if impl_code:
+                impl_path = os.path.join(working_dir, impl_filename)
+                with open(impl_path, "w") as f:
+                    f.write(impl_code)
+                logger.info(f"  Implementation written to {impl_path}")
+
+                # Run tests against the synthesized implementation
+                if test_code:
+                    run_result = await execute_tool({
+                        "type": "CodeRun",
+                        "command": "pytest -q test_sage_spec.py",
+                        "working_dir": working_dir,
+                        "timeout_secs": tool_timeout,
+                    })
+                    if (not run_result.get("tests_failed")
+                            and run_result.get("exit_code", -1) == 0):
+                        all_tests_pass = True
+                        logger.info("  ✓ Synthesized implementation passes all tests")
+                    else:
+                        logger.info("  ✗ Tests still failing after synthesis")
+
+                # Register CandidateAnswerNode in the graph
+                claim_ids = [c["meta"]["id"] for c in verified_claims]
+                candidate_id = state.add_candidate(
+                    content=impl_code,
+                    supporting_claim_ids=claim_ids,
+                )
+                candidate_content_map[candidate_id] = impl_code
+                logger.info(f"  Candidate {candidate_id[:8]} registered")
+        else:
+            logger.info("  Skipped (no verified claims or non-code task)")
+
+        # ===================================================================
         # Phase 9: Bank
         # ===================================================================
         logger.info("\n── Phase 9: Bank ──")
@@ -407,9 +456,12 @@ async def run_great_sage(
                     }
 
             if final_verify["result"] != "Fail":
+                winner_content = candidate_content_map.get(
+                    winner["id"], json.dumps(winner, indent=2)
+                )
                 final_verify = await brain.final_verify(
                     client=ollama,
-                    candidate_content=json.dumps(candidates[0], indent=2),
+                    candidate_content=winner_content,
                     supporting_claims=state.get_verified_claims_json(),
                     test_output=test_output,
                     task_prompt=task_prompt,
